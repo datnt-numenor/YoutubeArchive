@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="detail-bar">
+    <div>
+        <a class="back-link" href="/"><i class="bi bi-arrow-left"></i> Back</a>
+        <h1>{{ playlist.title }}</h1>
+        <p class="text-muted mb-0">{{ playlist.videos|length }} videos | Last sync: {{ playlist.last_synced.strftime('%Y-%m-%d %H:%M') if playlist.last_synced else 'Never' }}</p>
+    </div>
+    <div class="d-flex gap-2">
+        <button class="btn btn-outline-danger js-sync" data-playlist-id="{{ playlist.id }}" data-format="mp3">
+            <i class="bi bi-music-note-beamed me-1"></i>Sync MP3
+        </button>
+        <button class="btn btn-danger js-sync" data-playlist-id="{{ playlist.id }}" data-format="mp4">
+            <i class="bi bi-camera-video me-1"></i>Sync MP4
+        </button>
+    </div>
+</div>
+
+<div class="table-shell">
+    <table class="table align-middle mb-0">
+        <thead>
+            <tr>
+                <th>Video</th>
+                <th>Channel</th>
+                <th>Duration</th>
+                <th>Status</th>
+                <th class="text-end">Media</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for video in playlist.videos %}
+            <tr>
+                <td>
+                    <div class="video-cell">
+                        {% if video.thumbnail_url %}
+                        <img src="{{ video.thumbnail_url }}" alt="" loading="lazy">
+                        {% else %}
+                        <div class="thumb-placeholder"><i class="bi bi-play-fill"></i></div>
+                        {% endif %}
+                        <div>
+                            <div class="fw-semibold">{{ video.title }}</div>
+                            <div class="small text-muted">{{ video.yt_video_id }}</div>
+                            {% if video.download_error %}
+                            <div class="download-error mt-1">
+                                <i class="bi bi-exclamation-triangle me-1"></i>{{ video.download_error }}
+                            </div>
+                            {% endif %}
+                        </div>
+                    </div>
+                </td>
+                <td>{{ video.channel_name or 'Unknown' }}</td>
+                <td>{{ video.duration|duration }}</td>
+                <td>
+                    <span class="status-badge status-{{ video.status|lower }}">{{ video.status }}</span>
+                </td>
+                <td class="text-end">
+                    {% if video.local_file_path %}
+                    <a class="btn btn-sm btn-outline-secondary" href="/stream/{{ video.id }}" title="Open media">
+                        <i class="bi bi-play-circle"></i>
+                    </a>
+                    {% else %}
+                    <span class="text-muted small">Not saved</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" class="empty-state">No videos stored for this playlist.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

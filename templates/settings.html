@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="settings-grid">
+    <div>
+        <h1>Settings</h1>
+        <p class="text-muted">Local scheduler uses APScheduler AsyncIOScheduler.</p>
+    </div>
+    <div class="panel">
+        <form id="syncIntervalForm" class="settings-form">
+            <label class="form-label" for="syncHours">Auto-sync interval</label>
+            <div class="input-group">
+                <button class="btn btn-outline-secondary js-step" type="button" data-step="-1" title="Decrease">
+                    <i class="bi bi-dash-lg"></i>
+                </button>
+                <input class="form-control text-center" id="syncHours" type="number" min="1" max="168" value="{{ sync_interval_hours }}" required>
+                <button class="btn btn-outline-secondary js-step" type="button" data-step="1" title="Increase">
+                    <i class="bi bi-plus-lg"></i>
+                </button>
+                <span class="input-group-text">hours</span>
+            </div>
+            <button class="btn btn-danger mt-3" type="submit">
+                <i class="bi bi-save me-1"></i>Save
+            </button>
+        </form>
+    </div>
+</section>
+{% endblock %}

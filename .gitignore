@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.md
+!README.md
+.venv/
+venv/
+.env
+ytarchive.db
+downloads/*
+!downloads/.gitkeep
+.pytest_cache/
+.mypy_cache/
+uvicorn*.log
+cloudflared*.log
+localtunnel*.log

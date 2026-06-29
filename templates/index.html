@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="row g-4 align-items-start">
+    <div class="col-12 col-xl-4">
+        <div class="panel">
+            <div class="panel-header">
+                <h1>Archive playlist</h1>
+                <p>Lưu metadata trước, tải media khi bạn bấm sync.</p>
+            </div>
+            <form id="addPlaylistForm" class="d-grid gap-3">
+                <label class="form-label" for="playlistUrl">YouTube playlist URL</label>
+                <div class="input-group">
+                    <span class="input-group-text"><i class="bi bi-link-45deg"></i></span>
+                    <input class="form-control" id="playlistUrl" name="url" type="url" placeholder="https://www.youtube.com/playlist?list=..." required>
+                </div>
+                <button class="btn btn-danger" type="submit">
+                    <i class="bi bi-plus-lg me-1"></i>Add playlist
+                </button>
+            </form>
+        </div>
+
+        <div class="panel mt-3">
+            <div class="quota-grid">
+                <div>
+                    <span class="metric-label">Storage</span>
+                    <strong>{{ user.storage_used_bytes|bytes }}</strong>
+                    <small>of {{ user.storage_quota_bytes|bytes }}</small>
+                </div>
+                <div>
+                    <span class="metric-label">Playlist quota</span>
+                    <strong>{{ playlists|length }}</strong>
+                    <small>of {{ user.playlist_quota }}</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-12 col-xl-8">
+        <div class="section-heading">
+            <h2>Saved playlists</h2>
+            <span class="text-muted">{{ playlists|length }} total</span>
+        </div>
+        <div class="table-shell">
+            <table class="table align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th>Playlist</th>
+                        <th class="text-end">Videos</th>
+                        <th>Last sync</th>
+                        <th class="text-end">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for playlist in playlists %}
+                    <tr>
+                        <td>
+                            <a class="fw-semibold link-dark text-decoration-none" href="/playlist/{{ playlist.id }}">{{ playlist.title }}</a>
+                            <div class="small text-muted text-truncate table-url">{{ playlist.url }}</div>
+                        </td>
+                        <td class="text-end">{{ playlist.video_count }}</td>
+                        <td>{{ playlist.last_synced.strftime('%Y-%m-%d %H:%M') if playlist.last_synced else 'Never' }}</td>
+                        <td class="text-end">
+                            <div class="btn-group">
+                                <a class="btn btn-sm btn-outline-secondary" href="/playlist/{{ playlist.id }}" title="Open playlist">
+                                    <i class="bi bi-box-arrow-up-right"></i>
+                                </a>
+                                <button class="btn btn-sm btn-outline-danger js-sync" data-playlist-id="{{ playlist.id }}" data-format="mp3" title="Sync MP3">
+                                    <i class="bi bi-music-note-beamed"></i>
+                                </button>
+                                <button class="btn btn-sm btn-outline-dark js-delete" data-playlist-id="{{ playlist.id }}" title="Delete playlist">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="4" class="empty-state">No playlists archived yet.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</section>
+{% endblock %}
