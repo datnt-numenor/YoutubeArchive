@@ -4,7 +4,9 @@ import hmac
 import json
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import parse_qs
 
 from fastapi import Depends, HTTPException, Request, Response, status
 from sqlalchemy import func, select
@@ -12,11 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import get_session
-from models import User
+from models import AuthToken, User
 
 LOCAL_DEV_PASSWORD_MARKER = "local-dev-user"
 PASSWORD_ALGORITHM = "pbkdf2_sha256"
 PASSWORD_ITERATIONS = 260_000
+TOKEN_PURPOSE_PASSWORD_RESET = "password_reset"
+TOKEN_PURPOSE_EMAIL_VERIFY = "email_verify"
 
 
 def normalize_email(email: str) -> str:
@@ -30,6 +34,16 @@ def _base64url_encode(data: bytes) -> str:
 def _base64url_decode(value: str) -> bytes:
     padding = "=" * (-len(value) % 4)
     return base64.urlsafe_b64decode(value + padding)
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def ensure_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
 
 
 def hash_password(password: str) -> str:
@@ -72,6 +86,60 @@ def verify_password(password: str, stored_hash: str) -> bool:
         iterations,
     )
     return hmac.compare_digest(password_hash, expected)
+
+
+def hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def create_csrf_token() -> str:
+    nonce = secrets.token_urlsafe(24)
+    signature = hmac.new(settings.secret_key.encode("utf-8"), nonce.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{nonce}.{signature}"
+
+
+def verify_csrf_token(token: str | None) -> bool:
+    if not token or "." not in token:
+        return False
+    nonce, signature = token.rsplit(".", 1)
+    expected = hmac.new(settings.secret_key.encode("utf-8"), nonce.encode("ascii"), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected)
+
+
+def csrf_token_for_request(request: Request) -> str:
+    token = request.cookies.get(settings.csrf_cookie_name)
+    if verify_csrf_token(token):
+        return str(token)
+    return create_csrf_token()
+
+
+def set_csrf_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=settings.csrf_cookie_name,
+        value=token,
+        max_age=settings.auth_cookie_max_age_seconds,
+        httponly=False,
+        secure=settings.auth_cookie_secure_enabled,
+        samesite="lax",
+    )
+
+
+async def require_csrf(request: Request) -> None:
+    cookie_token = request.cookies.get(settings.csrf_cookie_name)
+    submitted_token = request.headers.get(settings.csrf_header_name)
+
+    if not submitted_token and request.headers.get("content-type", "").startswith("application/x-www-form-urlencoded"):
+        body = (await request.body()).decode("utf-8")
+        parsed = parse_qs(body, keep_blank_values=True)
+        submitted_token = (parsed.get("csrf_token") or [""])[-1]
+
+    if (
+        not cookie_token
+        or not submitted_token
+        or not hmac.compare_digest(cookie_token, submitted_token)
+        or not verify_csrf_token(cookie_token)
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid CSRF token")
 
 
 def _jwt_signature(signing_input: str) -> str:
@@ -172,7 +240,7 @@ async def register_user(
 
         existing_user.hashed_password = hash_password(password)
         existing_user.is_active = True
-        existing_user.is_verified = True
+        existing_user.is_verified = not settings.email_verification_required
         existing_user.is_superuser = existing_user.is_superuser or is_admin_email(normalized_email, password_user_count)
         await session.commit()
         await session.refresh(existing_user)
@@ -182,7 +250,7 @@ async def register_user(
         email=normalized_email,
         hashed_password=hash_password(password),
         is_active=True,
-        is_verified=True,
+        is_verified=not settings.email_verification_required,
         is_superuser=is_admin_email(normalized_email, password_user_count),
         playlist_quota=settings.default_playlist_quota,
         storage_quota_bytes=settings.storage_quota_bytes,
@@ -193,11 +261,113 @@ async def register_user(
     return user
 
 
+def is_user_locked(user: User) -> bool:
+    return bool(user.locked_until and ensure_aware(user.locked_until) > utc_now())
+
+
+async def create_auth_token(session: AsyncSession, user: User, purpose: str, expires_at: datetime) -> str:
+    raw_token = secrets.token_urlsafe(32)
+    token = AuthToken(
+        user_id=user.id,
+        token_hash=hash_token(raw_token),
+        purpose=purpose,
+        expires_at=expires_at,
+    )
+    session.add(token)
+    await session.commit()
+    return raw_token
+
+
+async def create_email_verification_token(session: AsyncSession, user: User) -> str:
+    return await create_auth_token(
+        session,
+        user,
+        TOKEN_PURPOSE_EMAIL_VERIFY,
+        utc_now() + timedelta(hours=settings.email_verification_token_hours),
+    )
+
+
+async def create_password_reset_token(session: AsyncSession, user: User) -> str:
+    return await create_auth_token(
+        session,
+        user,
+        TOKEN_PURPOSE_PASSWORD_RESET,
+        utc_now() + timedelta(minutes=settings.password_reset_token_minutes),
+    )
+
+
+async def consume_auth_token(session: AsyncSession, raw_token: str, purpose: str) -> User | None:
+    result = await session.execute(
+        select(AuthToken, User)
+        .join(User, AuthToken.user_id == User.id)
+        .where(
+            AuthToken.token_hash == hash_token(raw_token),
+            AuthToken.purpose == purpose,
+            AuthToken.used_at.is_(None),
+        )
+    )
+    row = result.first()
+    if not row:
+        return None
+
+    token, user = row
+    if ensure_aware(token.expires_at) < utc_now():
+        return None
+
+    token.used_at = utc_now()
+    await session.commit()
+    await session.refresh(user)
+    return user
+
+
+async def verify_email_token(session: AsyncSession, raw_token: str) -> User | None:
+    user = await consume_auth_token(session, raw_token, TOKEN_PURPOSE_EMAIL_VERIFY)
+    if not user:
+        return None
+    user.is_verified = True
+    await session.commit()
+    await session.refresh(user)
+    return user
+
+
+async def reset_password_with_token(session: AsyncSession, raw_token: str, new_password: str) -> User | None:
+    user = await consume_auth_token(session, raw_token, TOKEN_PURPOSE_PASSWORD_RESET)
+    if not user:
+        return None
+    user.hashed_password = hash_password(new_password)
+    user.failed_login_count = 0
+    user.locked_until = None
+    await session.commit()
+    await session.refresh(user)
+    return user
+
+
+async def find_user_by_email(session: AsyncSession, email: str) -> User | None:
+    result = await session.execute(select(User).where(User.email == normalize_email(email)))
+    return result.scalar_one_or_none()
+
+
 async def authenticate_user(session: AsyncSession, email: str, password: str) -> User | None:
     result = await session.execute(select(User).where(User.email == normalize_email(email)))
     user = result.scalar_one_or_none()
-    if not user or not user.is_active or not verify_password(password, user.hashed_password):
+    if not user or not user.is_active:
         return None
+    if is_user_locked(user):
+        return None
+    if settings.email_verification_required and not user.is_verified:
+        return None
+    if not verify_password(password, user.hashed_password):
+        user.failed_login_count += 1
+        if user.failed_login_count >= settings.login_max_attempts:
+            user.locked_until = utc_now() + timedelta(minutes=settings.login_lockout_minutes)
+            user.failed_login_count = 0
+        await session.commit()
+        return None
+
+    user.failed_login_count = 0
+    user.locked_until = None
+    await session.commit()
+    await session.refresh(user)
     return user
 
 

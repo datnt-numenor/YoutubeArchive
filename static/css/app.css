@@ -11,6 +11,10 @@ body {
     color: var(--ink);
 }
 
+body.has-player-bar {
+    padding-bottom: 96px;
+}
+
 .app-shell {
     max-width: 1320px;
 }
@@ -197,6 +201,31 @@ body {
     margin-bottom: 8px;
 }
 
+.playlist-controls {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 14px;
+    align-items: start;
+    margin-bottom: 14px;
+    padding: 14px;
+}
+
+.playback-menu {
+    min-width: 260px;
+    padding: 6px;
+}
+
+.playback-option {
+    align-items: center;
+    border-radius: 6px;
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+}
+
 .video-cell {
     display: grid;
     grid-template-columns: 96px minmax(0, 1fr);
@@ -275,6 +304,62 @@ body {
     text-align: center;
 }
 
+.admin-user-form {
+    align-items: center;
+    display: grid;
+    gap: 6px;
+    grid-template-columns: auto 88px 88px auto;
+    justify-content: end;
+}
+
+.global-player-bar {
+    background: rgba(255, 255, 255, .98);
+    border-top: 1px solid var(--line);
+    bottom: 0;
+    box-shadow: 0 -10px 24px rgba(31, 35, 40, .08);
+    left: 0;
+    padding: 10px 16px;
+    position: fixed;
+    right: 0;
+    z-index: 1035;
+}
+
+.global-player-inner {
+    align-items: center;
+    display: grid;
+    gap: 12px;
+    grid-template-columns: minmax(180px, 1fr) auto minmax(280px, 560px);
+    margin: 0 auto;
+}
+
+.global-player-meta strong {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.global-player-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.global-player-actions .btn {
+    align-items: center;
+    display: inline-flex;
+    height: 34px;
+    justify-content: center;
+    width: 38px;
+}
+
+.global-player-bar audio {
+    width: 100%;
+}
+
+body.has-player-bar .toast-container {
+    bottom: 96px !important;
+}
+
 @media (max-width: 768px) {
     .section-heading,
     .detail-bar,
@@ -297,5 +382,31 @@ body {
 
     .active-download-row {
         grid-template-columns: 1fr;
+    }
+
+    .admin-user-form {
+        grid-template-columns: 1fr 1fr;
+        justify-content: stretch;
+    }
+
+    .playlist-controls,
+    .global-player-inner {
+        grid-template-columns: 1fr;
+    }
+
+    .global-player-actions {
+        width: 100%;
+    }
+
+    .global-player-actions .btn {
+        flex: 1 1 0;
+    }
+
+    body.has-player-bar {
+        padding-bottom: 176px;
+    }
+
+    body.has-player-bar .toast-container {
+        bottom: 176px !important;
     }
 }

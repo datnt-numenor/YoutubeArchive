@@ -10,20 +10,34 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import crud
 from auth import (
     authenticate_user,
     clear_login_cookie,
+    create_email_verification_token,
+    create_password_reset_token,
+    csrf_token_for_request,
+    find_user_by_email,
     get_current_user,
     get_optional_user,
     register_user,
+    require_csrf,
+    require_superuser,
+    reset_password_with_token,
+    set_csrf_cookie,
     set_login_cookie,
+    verify_email_token,
 )
 from config import BASE_DIR, settings
 from database import get_session, init_db
 from downloader import extract_playlist_metadata
+from mailer import send_email
 from models import User
 from scheduler import scheduler, shutdown_scheduler, start_scheduler
 from schemas import (
@@ -35,7 +49,8 @@ from schemas import (
     TaskResponse,
     TaskStatusResponse,
 )
-from tasks import enqueue_local_sync, get_task_status, list_task_statuses
+from storage import storage
+from tasks import enqueue_sync, get_task_status, list_task_statuses
 
 try:
     import sentry_sdk
@@ -61,6 +76,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+limiter = Limiter(key_func=get_remote_address, headers_enabled=True)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
@@ -101,6 +120,19 @@ def login_redirect(request: Request) -> RedirectResponse:
     return RedirectResponse(f"/login?next={request.url.path}", status_code=status.HTTP_303_SEE_OTHER)
 
 
+def render_template(request: Request, template_name: str, context: dict[str, object], status_code: int = 200):
+    csrf_token = csrf_token_for_request(request)
+    context = {
+        **context,
+        "csrf_token": csrf_token,
+        "csrf_cookie_name": settings.csrf_cookie_name,
+        "csrf_header_name": settings.csrf_header_name,
+    }
+    response = templates.TemplateResponse(request, template_name, context, status_code=status_code)
+    set_csrf_cookie(response, csrf_token)
+    return response
+
+
 async def read_form_fields(request: Request) -> dict[str, str]:
     body = (await request.body()).decode("utf-8")
     parsed = parse_qs(body, keep_blank_values=True)
@@ -115,7 +147,7 @@ async def login_page(
 ):
     if current_user:
         return RedirectResponse(safe_next_path(next), status_code=status.HTTP_303_SEE_OTHER)
-    return templates.TemplateResponse(
+    return render_template(
         request,
         "login.html",
         {
@@ -124,14 +156,17 @@ async def login_page(
             "user": None,
             "next": safe_next_path(next),
             "error": None,
+            "message": None,
         },
     )
 
 
 @app.post("/login")
+@limiter.limit("10/minute")
 async def login(
     request: Request,
     session: AsyncSession = Depends(get_session),
+    _csrf: None = Depends(require_csrf),
 ):
     form = await read_form_fields(request)
     email = form.get("email", "")
@@ -139,7 +174,7 @@ async def login(
     next_path = form.get("next")
     user = await authenticate_user(session, email, password)
     if not user:
-        return templates.TemplateResponse(
+        return render_template(
             request,
             "login.html",
             {
@@ -148,6 +183,7 @@ async def login(
                 "user": None,
                 "next": safe_next_path(next_path),
                 "error": "Email or password is incorrect.",
+                "message": None,
             },
             status_code=status.HTTP_400_BAD_REQUEST,
         )
@@ -164,7 +200,7 @@ async def register_page(
 ):
     if current_user:
         return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
-    return templates.TemplateResponse(
+    return render_template(
         request,
         "register.html",
         {
@@ -172,22 +208,25 @@ async def register_page(
             "app_name": settings.app_name,
             "user": None,
             "error": None,
+            "message": None,
             "invite_required": bool(settings.registration_invite_code),
         },
     )
 
 
 @app.post("/register")
+@limiter.limit("5/hour")
 async def register(
     request: Request,
     session: AsyncSession = Depends(get_session),
+    _csrf: None = Depends(require_csrf),
 ):
     form = await read_form_fields(request)
     email = form.get("email", "")
     password = form.get("password", "")
     invite_code = form.get("invite_code")
     if len(password) < 8:
-        return templates.TemplateResponse(
+        return render_template(
             request,
             "register.html",
             {
@@ -195,6 +234,7 @@ async def register(
                 "app_name": settings.app_name,
                 "user": None,
                 "error": "Password must be at least 8 characters.",
+                "message": None,
                 "invite_required": bool(settings.registration_invite_code),
             },
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -203,7 +243,7 @@ async def register(
     try:
         user = await register_user(session, email, password, invite_code)
     except HTTPException as exc:
-        return templates.TemplateResponse(
+        return render_template(
             request,
             "register.html",
             {
@@ -211,9 +251,26 @@ async def register(
                 "app_name": settings.app_name,
                 "user": None,
                 "error": str(exc.detail),
+                "message": None,
                 "invite_required": bool(settings.registration_invite_code),
             },
             status_code=exc.status_code,
+        )
+
+    if settings.email_verification_required and not user.is_verified:
+        token = await create_email_verification_token(session, user)
+        await send_verification_email(user, token)
+        return render_template(
+            request,
+            "login.html",
+            {
+                "request": request,
+                "app_name": settings.app_name,
+                "user": None,
+                "next": "/",
+                "error": None,
+                "message": "Registration complete. Check your email to verify your account before logging in.",
+            },
         )
 
     response = RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
@@ -222,10 +279,163 @@ async def register(
 
 
 @app.post("/logout")
-async def logout() -> RedirectResponse:
+@limiter.limit("30/minute")
+async def logout(request: Request, _csrf: None = Depends(require_csrf)) -> RedirectResponse:
     response = RedirectResponse("/login", status_code=status.HTTP_303_SEE_OTHER)
     clear_login_cookie(response)
     return response
+
+
+def build_public_url(path: str) -> str:
+    return f"{settings.app_base_url.rstrip('/')}{path}"
+
+
+async def send_verification_email(user: User, token: str) -> None:
+    url = build_public_url(f"/verify-email?token={token}")
+    await send_email(
+        user.email,
+        "Verify your YouTube Archive account",
+        f"Verify your account by opening this link:\n\n{url}\n\nThis link expires in {settings.email_verification_token_hours} hour(s).",
+    )
+
+
+async def send_password_reset_email(user: User, token: str) -> None:
+    url = build_public_url(f"/reset-password?token={token}")
+    await send_email(
+        user.email,
+        "Reset your YouTube Archive password",
+        f"Reset your password by opening this link:\n\n{url}\n\nThis link expires in {settings.password_reset_token_minutes} minute(s).",
+    )
+
+
+@app.get("/forgot-password")
+async def forgot_password_page(request: Request, current_user: User | None = Depends(get_optional_user)):
+    if current_user:
+        return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+    return render_template(
+        request,
+        "forgot_password.html",
+        {
+            "request": request,
+            "app_name": settings.app_name,
+            "user": None,
+            "error": None,
+            "message": None,
+        },
+    )
+
+
+@app.post("/forgot-password")
+@limiter.limit("5/hour")
+async def forgot_password(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _csrf: None = Depends(require_csrf),
+):
+    form = await read_form_fields(request)
+    user = await find_user_by_email(session, form.get("email", ""))
+    if user and user.hashed_password:
+        token = await create_password_reset_token(session, user)
+        await send_password_reset_email(user, token)
+
+    return render_template(
+        request,
+        "forgot_password.html",
+        {
+            "request": request,
+            "app_name": settings.app_name,
+            "user": None,
+            "error": None,
+            "message": "If that email exists, a reset link has been sent.",
+        },
+    )
+
+
+@app.get("/reset-password")
+async def reset_password_page(request: Request, token: str):
+    return render_template(
+        request,
+        "reset_password.html",
+        {
+            "request": request,
+            "app_name": settings.app_name,
+            "user": None,
+            "token": token,
+            "error": None,
+        },
+    )
+
+
+@app.post("/reset-password")
+@limiter.limit("10/hour")
+async def reset_password(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _csrf: None = Depends(require_csrf),
+):
+    form = await read_form_fields(request)
+    token = form.get("token", "")
+    password = form.get("password", "")
+    if len(password) < 8:
+        return render_template(
+            request,
+            "reset_password.html",
+            {
+                "request": request,
+                "app_name": settings.app_name,
+                "user": None,
+                "token": token,
+                "error": "Password must be at least 8 characters.",
+            },
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user = await reset_password_with_token(session, token, password)
+    if not user:
+        return render_template(
+            request,
+            "reset_password.html",
+            {
+                "request": request,
+                "app_name": settings.app_name,
+                "user": None,
+                "token": token,
+                "error": "Reset link is invalid or expired.",
+            },
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+
+    return render_template(
+        request,
+        "login.html",
+        {
+            "request": request,
+            "app_name": settings.app_name,
+            "user": None,
+            "next": "/",
+            "error": None,
+            "message": "Password reset complete. You can log in now.",
+        },
+    )
+
+
+@app.get("/verify-email")
+async def verify_email(request: Request, token: str, session: AsyncSession = Depends(get_session)):
+    user = await verify_email_token(session, token)
+    message = "Email verified. You can log in now." if user else "Verification link is invalid or expired."
+    return render_template(
+        request,
+        "login.html",
+        {
+            "request": request,
+            "app_name": settings.app_name,
+            "user": None,
+            "next": "/",
+            "error": None if user else message,
+            "message": message if user else None,
+        },
+        status_code=status.HTTP_200_OK if user else status.HTTP_400_BAD_REQUEST,
+    )
 
 
 @app.get("/")
@@ -237,7 +447,7 @@ async def index(
     if not current_user:
         return login_redirect(request)
     playlists = await crud.list_playlists(session, current_user.id)
-    return templates.TemplateResponse(
+    return render_template(
         request,
         "index.html",
         {
@@ -253,7 +463,7 @@ async def index(
 async def settings_page(request: Request, current_user: User | None = Depends(get_optional_user)):
     if not current_user:
         return login_redirect(request)
-    return templates.TemplateResponse(
+    return render_template(
         request,
         "settings.html",
         {
@@ -263,6 +473,54 @@ async def settings_page(request: Request, current_user: User | None = Depends(ge
             "sync_interval_hours": settings.sync_interval_hours,
         },
     )
+
+
+@app.get("/admin")
+@limiter.limit("30/minute")
+async def admin_page(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(require_superuser),
+):
+    users = await crud.list_admin_users(session)
+    active_task_list = list_task_statuses()
+    return render_template(
+        request,
+        "admin.html",
+        {
+            "request": request,
+            "app_name": settings.app_name,
+            "user": current_user,
+            "users": users,
+            "active_tasks": active_task_list,
+        },
+    )
+
+
+@app.post("/admin/users/{user_id}")
+@limiter.limit("30/minute")
+async def admin_update_user(
+    request: Request,
+    user_id: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(require_superuser),
+    _csrf: None = Depends(require_csrf),
+) -> RedirectResponse:
+    form = await read_form_fields(request)
+    playlist_quota = max(0, int(form.get("playlist_quota") or 0))
+    storage_quota_gb = max(0, int(form.get("storage_quota_gb") or 0))
+    is_active = form.get("is_active") == "on"
+    if user_id == current_user.id:
+        is_active = True
+
+    await crud.update_user_admin_settings(
+        session,
+        user_id,
+        is_active=is_active,
+        playlist_quota=playlist_quota,
+        storage_quota_bytes=storage_quota_gb * 1024 * 1024 * 1024,
+    )
+    return RedirectResponse("/admin", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @app.get("/playlist/{playlist_id}")
@@ -275,7 +533,7 @@ async def playlist_detail(
     if not current_user:
         return login_redirect(request)
     detail = await crud.get_playlist_detail(session, playlist_id, current_user.id)
-    return templates.TemplateResponse(
+    return render_template(
         request,
         "detail.html",
         {
@@ -288,7 +546,9 @@ async def playlist_detail(
 
 
 @app.get("/api/playlists")
+@limiter.limit("60/minute")
 async def api_playlists(
+    request: Request,
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
@@ -296,10 +556,13 @@ async def api_playlists(
 
 
 @app.post("/playlist/add", response_model=PlaylistAddResponse)
+@limiter.limit("10/minute")
 async def add_playlist(
+    request: Request,
     payload: PlaylistAddRequest,
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
+    _csrf: None = Depends(require_csrf),
 ) -> PlaylistAddResponse:
     try:
         metadata = await extract_playlist_metadata(payload.url)
@@ -313,22 +576,31 @@ async def add_playlist(
 
 
 @app.post("/playlist/{playlist_id}/sync", response_model=TaskResponse)
+@limiter.limit("5/minute")
 async def sync_playlist(
+    request: Request,
     playlist_id: int,
     payload: SyncRequest,
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
+    _csrf: None = Depends(require_csrf),
 ) -> TaskResponse:
     playlist = await crud.get_playlist_for_owner(session, playlist_id, current_user.id)
-    task = enqueue_local_sync(playlist_id, current_user.id, playlist.title, payload.format)
+    try:
+        task = enqueue_sync(playlist_id, current_user.id, playlist.title, payload.format)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     return TaskResponse(task_id=task.task_id, status=task.status, message="Sync task queued")
 
 
 @app.delete("/playlist/{playlist_id}", response_model=BaseResponse)
+@limiter.limit("20/minute")
 async def delete_playlist(
+    request: Request,
     playlist_id: int,
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
+    _csrf: None = Depends(require_csrf),
 ) -> BaseResponse:
     orphaned_paths = await crud.delete_playlist(session, playlist_id, current_user.id)
     message = "Playlist deleted"
@@ -338,22 +610,33 @@ async def delete_playlist(
 
 
 @app.get("/stream/{video_id}")
+@limiter.limit("120/minute")
 async def stream_video(
+    request: Request,
     video_id: int,
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
     media_path = await crud.get_download_path_for_video(session, current_user.id, video_id)
-    full_path = media_path if media_path.is_absolute() else BASE_DIR / media_path
+    media_url = await storage.get_file_url(media_path.as_posix())
+    if media_url.startswith(("http://", "https://")):
+        return RedirectResponse(media_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+    full_path = Path(media_url)
+    if not full_path.is_absolute():
+        full_path = BASE_DIR / full_path
     if not full_path.exists():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media file not found on disk")
     return FileResponse(full_path)
 
 
 @app.patch("/settings/sync-interval", response_model=BaseResponse)
+@limiter.limit("20/minute")
 async def update_sync_interval(
+    request: Request,
     payload: SyncIntervalRequest,
     _current_user: User = Depends(get_current_user),
+    _csrf: None = Depends(require_csrf),
 ) -> BaseResponse:
     settings.sync_interval_hours = payload.hours
     if scheduler.running and scheduler.get_job("auto_sync_playlists"):
@@ -362,7 +645,9 @@ async def update_sync_interval(
 
 
 @app.get("/task/{task_id}/status", response_model=TaskStatusResponse)
+@limiter.limit("120/minute")
 async def task_status(
+    request: Request,
     task_id: str,
     current_user: User = Depends(get_current_user),
 ) -> TaskStatusResponse:
@@ -375,7 +660,9 @@ async def task_status(
 
 
 @app.get("/tasks/active", response_model=list[TaskStatusResponse])
+@limiter.limit("120/minute")
 async def active_tasks(
+    request: Request,
     playlist_id: int | None = None,
     current_user: User = Depends(get_current_user),
 ) -> list[TaskStatusResponse]:
@@ -384,7 +671,9 @@ async def active_tasks(
 
 
 @app.get("/task/{task_id}/stream")
+@limiter.limit("30/minute")
 async def task_stream(
+    request: Request,
     task_id: str,
     current_user: User = Depends(get_current_user),
 ):

@@ -1,0 +1,15 @@
+[Unit]
+Description=YouTube Archive Celery worker
+After=network.target
+
+[Service]
+User=ytarchive
+Group=ytarchive
+WorkingDirectory=/opt/ytarchive
+EnvironmentFile=/opt/ytarchive/.env
+ExecStart=/opt/ytarchive/.venv/bin/celery -A worker.celery_app worker --loglevel=info --concurrency=2
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

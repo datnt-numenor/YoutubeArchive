@@ -1,9 +1,15 @@
 import asyncio
+import json
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
+
+try:
+    from redis import Redis
+except ImportError:  # pragma: no cover - runtime dependency is declared in requirements
+    Redis = None  # type: ignore[assignment]
 
 try:
     import sentry_sdk
@@ -59,6 +65,11 @@ class TaskProgress:
 
 
 task_registry: dict[str, TaskProgress] = {}
+_redis: Any | None = None
+
+TASK_KEY_PREFIX = "ytarchive:task:"
+OWNER_TASKS_KEY_PREFIX = "ytarchive:owner_tasks:"
+ACTIVE_TASK_KEY_PREFIX = "ytarchive:active_task:"
 
 
 UNAVAILABLE_ERROR_MARKERS = (
@@ -70,9 +81,95 @@ UNAVAILABLE_ERROR_MARKERS = (
 )
 
 
+def build_media_object_key(owner_id: str, playlist_id: int, filename: str) -> str:
+    safe_filename = filename.replace("\\", "/").split("/")[-1]
+    return f"users/{owner_id}/playlists/{playlist_id}/{safe_filename}"
+
+
 def is_youtube_unavailable_error(message: str) -> bool:
     normalized = message.lower()
     return any(marker in normalized for marker in UNAVAILABLE_ERROR_MARKERS)
+
+
+def _redis_client() -> Any | None:
+    if not settings.use_celery_tasks:
+        return None
+    if Redis is None:
+        raise RuntimeError("Redis package is not installed")
+
+    global _redis
+    if _redis is None:
+        _redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    return _redis
+
+
+def _task_key(task_id: str) -> str:
+    return f"{TASK_KEY_PREFIX}{task_id}"
+
+
+def _owner_tasks_key(owner_id: str) -> str:
+    return f"{OWNER_TASKS_KEY_PREFIX}{owner_id}"
+
+
+def _active_task_key(playlist_id: int, owner_id: str, format_: str) -> str:
+    return f"{ACTIVE_TASK_KEY_PREFIX}{owner_id}:{playlist_id}:{format_}"
+
+
+def _coerce_task(raw: dict[str, Any]) -> TaskProgress:
+    fields = TaskProgress.__dataclass_fields__
+    data = {key: raw[key] for key in fields if key in raw}
+    data["errors"] = [
+        error if isinstance(error, TaskVideoError) else TaskVideoError(**error)
+        for error in raw.get("errors", [])
+    ]
+    return TaskProgress(**data)
+
+
+def _load_redis_task(task_id: str) -> TaskProgress | None:
+    client = _redis_client()
+    if client is None:
+        return None
+
+    payload = client.get(_task_key(task_id))
+    if not payload:
+        return None
+    if isinstance(payload, bytes):
+        payload = payload.decode("utf-8")
+    return _coerce_task(json.loads(payload))
+
+
+def _save_redis_task(task: TaskProgress) -> None:
+    client = _redis_client()
+    if client is None:
+        return
+
+    ttl = settings.task_status_ttl_seconds
+    client.setex(_task_key(task.task_id), ttl, json.dumps(task.to_dict()))
+    if task.owner_id:
+        owner_key = _owner_tasks_key(task.owner_id)
+        client.sadd(owner_key, task.task_id)
+        client.expire(owner_key, ttl)
+
+    if task.playlist_id is None or not task.owner_id or not task.format:
+        return
+
+    active_key = _active_task_key(task.playlist_id, task.owner_id, task.format)
+    if task.status in ACTIVE_TASK_STATES:
+        client.setex(active_key, ttl, task.task_id)
+        return
+
+    active_task_id = client.get(active_key)
+    if isinstance(active_task_id, bytes):
+        active_task_id = active_task_id.decode("utf-8")
+    if active_task_id == task.task_id:
+        client.delete(active_key)
+
+
+def _save_task(task: TaskProgress) -> None:
+    if settings.use_celery_tasks:
+        _save_redis_task(task)
+    else:
+        task_registry[task.task_id] = task
 
 
 def create_task_status(playlist_id: int, owner_id: str, playlist_title: str, format_: str) -> TaskProgress:
@@ -86,16 +183,33 @@ def create_task_status(playlist_id: int, owner_id: str, playlist_title: str, for
         format=format_,
         progress=0,
     )
-    task_registry[task_id] = progress
+    _save_task(progress)
     return progress
 
 
 def get_task_status(task_id: str) -> TaskProgress | None:
+    if settings.use_celery_tasks:
+        return _load_redis_task(task_id)
     return task_registry.get(task_id)
 
 
 def list_task_statuses(owner_id: str | None = None, playlist_id: int | None = None) -> list[TaskProgress]:
-    tasks = list(task_registry.values())
+    if settings.use_celery_tasks:
+        client = _redis_client()
+        if client is None:
+            return []
+        task_ids: set[str] = set()
+        if owner_id is not None:
+            raw_task_ids = client.smembers(_owner_tasks_key(owner_id))
+            task_ids = {task_id.decode("utf-8") if isinstance(task_id, bytes) else task_id for task_id in raw_task_ids}
+        else:
+            for key in client.scan_iter(f"{TASK_KEY_PREFIX}*"):
+                key_text = key.decode("utf-8") if isinstance(key, bytes) else key
+                task_ids.add(key_text.removeprefix(TASK_KEY_PREFIX))
+        tasks = [task for task_id in task_ids if (task := _load_redis_task(task_id))]
+    else:
+        tasks = list(task_registry.values())
+
     if owner_id is not None:
         tasks = [task for task in tasks if task.owner_id == owner_id]
     if playlist_id is not None:
@@ -105,6 +219,26 @@ def list_task_statuses(owner_id: str | None = None, playlist_id: int | None = No
 
 
 def find_active_task(playlist_id: int, owner_id: str, format_: str) -> TaskProgress | None:
+    if settings.use_celery_tasks:
+        client = _redis_client()
+        if client is None:
+            return None
+
+        active_key = _active_task_key(playlist_id, owner_id, format_)
+        task_id = client.get(active_key)
+        if isinstance(task_id, bytes):
+            task_id = task_id.decode("utf-8")
+        if task_id:
+            task = _load_redis_task(task_id)
+            if task and task.status in ACTIVE_TASK_STATES:
+                return task
+            client.delete(active_key)
+
+        for task in list_task_statuses(owner_id=owner_id, playlist_id=playlist_id):
+            if task.format == format_ and task.status in ACTIVE_TASK_STATES:
+                return task
+        return None
+
     for task in task_registry.values():
         if (
             task.playlist_id == playlist_id
@@ -128,10 +262,9 @@ def _update_task(
     current_video: str | None = None,
     append_error: TaskVideoError | None = None,
 ) -> None:
-    task = task_registry.get(task_id)
+    task = get_task_status(task_id)
     if not task:
         task = TaskProgress(task_id=task_id, status="queued", progress=0)
-        task_registry[task_id] = task
 
     task.updated_at = datetime.now(timezone.utc).isoformat()
     if status is not None:
@@ -152,6 +285,8 @@ def _update_task(
         task.current_video = current_video
     if append_error is not None:
         task.errors.append(append_error)
+
+    _save_task(task)
 
 
 async def sync_playlist(session: AsyncSession, playlist: Playlist, owner: User, format_: str, task_id: str | None = None) -> None:
@@ -222,7 +357,10 @@ async def sync_playlist(session: AsyncSession, playlist: Playlist, owner: User, 
                     )
                 continue
 
-            object_key = await storage.upload_file(local_path, local_path.name)
+            object_key = await storage.upload_file(
+                local_path,
+                build_media_object_key(owner.id, association.playlist_id, local_path.name),
+            )
             await crud.mark_video_downloaded(session, association, object_key, format_, file_size, owner)
             completed += 1
         except Exception as exc:  # noqa: BLE001
@@ -295,3 +433,38 @@ def enqueue_local_sync(playlist_id: int, owner_id: str, playlist_title: str, for
 
     asyncio.create_task(runner())
     return progress
+
+
+def _send_celery_sync_task(playlist_id: int, owner_id: str, format_: str, task_id: str) -> None:
+    from worker import sync_playlist_task
+
+    sync_playlist_task.apply_async(
+        args=[playlist_id, owner_id, format_, task_id],
+        task_id=task_id,
+    )
+
+
+def enqueue_celery_sync(playlist_id: int, owner_id: str, playlist_title: str, format_: str) -> TaskProgress:
+    progress: TaskProgress | None = None
+    try:
+        existing = find_active_task(playlist_id, owner_id, format_)
+        if existing:
+            return existing
+
+        progress = create_task_status(playlist_id, owner_id, playlist_title, format_)
+        _send_celery_sync_task(playlist_id, owner_id, format_, progress.task_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to enqueue Celery sync task")
+        if progress:
+            try:
+                _update_task(progress.task_id, status="failed", error=str(exc) or exc.__class__.__name__)
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to mark Celery sync task as failed")
+        raise RuntimeError("Unable to enqueue sync task with Celery/Redis") from exc
+    return progress
+
+
+def enqueue_sync(playlist_id: int, owner_id: str, playlist_title: str, format_: str) -> TaskProgress:
+    if settings.use_celery_tasks:
+        return enqueue_celery_sync(playlist_id, owner_id, playlist_title, format_)
+    return enqueue_local_sync(playlist_id, owner_id, playlist_title, format_)

@@ -17,6 +17,40 @@
     </div>
 </div>
 
+<section class="playlist-controls">
+    <div class="playlist-search">
+        <label class="visually-hidden" for="videoSearch">Search videos</label>
+        <div class="input-group">
+            <span class="input-group-text"><i class="bi bi-search"></i></span>
+            <input class="form-control" id="videoSearch" type="search" placeholder="Search by video name, channel, or ID" autocomplete="off">
+            <button class="btn btn-outline-secondary" type="button" id="clearVideoSearch" title="Clear search">
+                <i class="bi bi-x-lg"></i>
+            </button>
+        </div>
+        <div class="small text-muted mt-2" id="videoSearchCount">{{ playlist.videos|length }} videos shown</div>
+    </div>
+
+    <div class="dropdown">
+        <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+            <i class="bi bi-sliders me-1"></i>Playback options
+        </button>
+        <div class="dropdown-menu dropdown-menu-end playback-menu">
+            <label class="dropdown-item playback-option" for="playbackRepeat">
+                <span><i class="bi bi-repeat me-2"></i>Repeat current track</span>
+                <input class="form-check-input" id="playbackRepeat" type="checkbox">
+            </label>
+            <label class="dropdown-item playback-option" for="playbackAutoNext">
+                <span><i class="bi bi-skip-forward me-2"></i>Auto-play next</span>
+                <input class="form-check-input" id="playbackAutoNext" type="checkbox" checked>
+            </label>
+            <label class="dropdown-item playback-option" for="playbackShuffle">
+                <span><i class="bi bi-shuffle me-2"></i>Shuffle</span>
+                <input class="form-check-input" id="playbackShuffle" type="checkbox">
+            </label>
+        </div>
+    </div>
+</section>
+
 <div class="table-shell">
     <table class="table align-middle mb-0">
         <thead>
@@ -30,7 +64,7 @@
         </thead>
         <tbody>
             {% for video in playlist.videos %}
-            <tr>
+            <tr class="js-video-row" data-title="{{ video.title|lower }}" data-channel="{{ (video.channel_name or '')|lower }}" data-yt-id="{{ video.yt_video_id|lower }}">
                 <td>
                     <div class="video-cell">
                         {% if video.thumbnail_url %}
@@ -39,7 +73,7 @@
                         <div class="thumb-placeholder"><i class="bi bi-play-fill"></i></div>
                         {% endif %}
                         <div>
-                            <div class="fw-semibold">{{ video.title }}</div>
+                            <div class="fw-semibold js-video-title">{{ video.title }}</div>
                             <div class="small text-muted">{{ video.yt_video_id }}</div>
                             {% if video.download_error %}
                             <div class="download-error mt-1">
@@ -56,9 +90,9 @@
                 </td>
                 <td class="text-end">
                     {% if video.local_file_path %}
-                    <a class="btn btn-sm btn-outline-secondary" href="/stream/{{ video.id }}" title="Open media">
+                    <button class="btn btn-sm btn-outline-secondary js-play-media" type="button" data-video-id="{{ video.id }}" data-stream-url="/stream/{{ video.id }}" data-title="{{ video.title }}" title="Play media">
                         <i class="bi bi-play-circle"></i>
-                    </a>
+                    </button>
                     {% else %}
                     <span class="text-muted small">Not saved</span>
                     {% endif %}
@@ -69,6 +103,9 @@
                 <td colspan="5" class="empty-state">No videos stored for this playlist.</td>
             </tr>
             {% endfor %}
+            <tr class="d-none" id="videoSearchEmpty">
+                <td colspan="5" class="empty-state">No videos match your search.</td>
+            </tr>
         </tbody>
     </table>
 </div>

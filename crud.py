@@ -41,6 +41,41 @@ async def list_playlists(session: AsyncSession, owner_id: str) -> list[PlaylistS
     ]
 
 
+async def list_admin_users(session: AsyncSession) -> list[dict[str, Any]]:
+    result = await session.execute(
+        select(User, func.count(Playlist.id))
+        .outerjoin(Playlist, Playlist.owner_id == User.id)
+        .group_by(User.id)
+        .order_by(User.created_at.desc())
+    )
+    return [
+        {
+            "user": user,
+            "playlist_count": int(playlist_count or 0),
+        }
+        for user, playlist_count in result.all()
+    ]
+
+
+async def update_user_admin_settings(
+    session: AsyncSession,
+    user_id: str,
+    *,
+    is_active: bool,
+    playlist_quota: int,
+    storage_quota_bytes: int,
+) -> User:
+    user = await session.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    user.is_active = is_active
+    user.playlist_quota = playlist_quota
+    user.storage_quota_bytes = storage_quota_bytes
+    await session.commit()
+    await session.refresh(user)
+    return user
+
+
 async def get_playlist_for_owner(session: AsyncSession, playlist_id: int, owner_id: str) -> Playlist:
     result = await session.execute(
         select(Playlist)
@@ -251,6 +286,15 @@ async def set_playlist_auto_sync(session: AsyncSession, playlist_id: int, owner_
 
 async def list_auto_sync_playlist_ids(session: AsyncSession) -> list[int]:
     result = await session.execute(select(Playlist.id).where(Playlist.auto_sync.is_(True)))
+    return list(result.scalars().all())
+
+
+async def list_auto_sync_playlists(session: AsyncSession) -> list[Playlist]:
+    result = await session.execute(
+        select(Playlist)
+        .where(Playlist.auto_sync.is_(True))
+        .order_by(Playlist.last_synced.isnot(None), Playlist.last_synced.asc(), Playlist.created_at.asc())
+    )
     return list(result.scalars().all())
 
 

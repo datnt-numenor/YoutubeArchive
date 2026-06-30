@@ -1,0 +1,15 @@
+[Unit]
+Description=YouTube Archive FastAPI web service
+After=network.target
+
+[Service]
+User=ytarchive
+Group=ytarchive
+WorkingDirectory=/opt/ytarchive
+EnvironmentFile=/opt/ytarchive/.env
+ExecStart=/opt/ytarchive/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --proxy-headers
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

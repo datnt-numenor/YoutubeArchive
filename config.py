@@ -17,13 +17,23 @@ class Settings(BaseSettings):
     auth_cookie_name: str = "ytarchive_session"
     auth_cookie_max_age_seconds: int = 60 * 60 * 24 * 7
     auth_cookie_secure: bool | None = None
+    csrf_cookie_name: str = "ytarchive_csrf"
+    csrf_header_name: str = "x-csrf-token"
     registration_invite_code: str | None = None
     admin_emails: str = ""
+    require_email_verification: bool | None = None
+    login_max_attempts: int = Field(default=5, ge=1)
+    login_lockout_minutes: int = Field(default=15, ge=1)
+    password_reset_token_minutes: int = Field(default=30, ge=5)
+    email_verification_token_hours: int = Field(default=24, ge=1)
 
     database_url: str = DEFAULT_SQLITE_URL
     redis_url: str = "redis://localhost:6379/0"
+    task_backend: Literal["local", "celery"] | None = None
+    task_status_ttl_seconds: int = 60 * 60 * 24
 
     downloads_dir: Path = BASE_DIR / "downloads"
+    storage_backend: Literal["local", "s3"] | None = None
     default_user_email: str = "local@example.com"
     default_playlist_quota: int = 10
     default_storage_quota_gb: int = 5
@@ -38,6 +48,14 @@ class Settings(BaseSettings):
     s3_secret_access_key: str | None = None
     s3_presigned_url_expiry: int = 3600
     sentry_dsn: str | None = None
+
+    app_base_url: str = "http://127.0.0.1:8000"
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_email: str | None = None
+    smtp_use_tls: bool = True
 
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env",
@@ -56,8 +74,32 @@ class Settings(BaseSettings):
         return self.environment == "production"
 
     @property
+    def email_verification_required(self) -> bool:
+        if self.require_email_verification is not None:
+            return self.require_email_verification
+        return self.environment == "production"
+
+    @property
     def admin_email_set(self) -> set[str]:
         return {email.strip().lower() for email in self.admin_emails.split(",") if email.strip()}
+
+    @property
+    def resolved_task_backend(self) -> Literal["local", "celery"]:
+        if self.task_backend:
+            return self.task_backend
+        return "celery" if self.environment == "production" else "local"
+
+    @property
+    def use_celery_tasks(self) -> bool:
+        return self.resolved_task_backend == "celery"
+
+    @property
+    def resolved_storage_backend(self) -> Literal["local", "s3"]:
+        if self.storage_backend:
+            return self.storage_backend
+        if self.environment == "production" and self.s3_bucket_name:
+            return "s3"
+        return "local"
 
 
 @lru_cache

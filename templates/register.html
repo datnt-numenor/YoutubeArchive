@@ -10,7 +10,11 @@
         {% if error %}
         <div class="alert alert-danger" role="alert">{{ error }}</div>
         {% endif %}
+        {% if message %}
+        <div class="alert alert-success" role="alert">{{ message }}</div>
+        {% endif %}
         <form method="post" action="/register" class="d-grid gap-3">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <div>
                 <label class="form-label" for="email">Email</label>
                 <div class="input-group">
