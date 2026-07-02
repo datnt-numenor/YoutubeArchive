@@ -69,6 +69,7 @@ const pagePrefetches = new Map();
 const PAGE_CACHE_TTL_MS = 30_000;
 const PAGE_CACHE_MAX_ENTRIES = 16;
 const PAGE_PREFETCH_LIMIT = 8;
+const PAGE_PREFETCH_START_DELAY_MS = 180;
 
 function navigationKey(url) {
     const normalized = new URL(url, window.location.href);
@@ -240,11 +241,7 @@ function scheduleNavigationPrefetch() {
         });
     };
 
-    if ("requestIdleCallback" in window) {
-        window.requestIdleCallback(run, { timeout: 1500 });
-    } else {
-        window.setTimeout(run, 500);
-    }
+    window.setTimeout(run, PAGE_PREFETCH_START_DELAY_MS);
 }
 
 function escapeHtml(value) {
