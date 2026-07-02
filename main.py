@@ -39,7 +39,7 @@ from auth import (
 )
 from config import BASE_DIR, settings
 from database import get_session, init_db
-from downloader import extract_playlist_metadata
+from downloader import canonicalize_playlist_url, extract_playlist_id_from_url
 from mailer import send_email
 from models import Playlist, PlaylistVideo, User, Video
 from scheduler import scheduler, shutdown_scheduler, start_scheduler
@@ -53,7 +53,7 @@ from schemas import (
     TaskStatusResponse,
 )
 from storage import storage
-from tasks import enqueue_sync, get_task_status, list_task_statuses
+from tasks import enqueue_metadata_import, enqueue_sync, get_task_status, list_task_statuses
 
 try:
     import sentry_sdk
@@ -63,7 +63,7 @@ except ImportError:  # pragma: no cover - optional production dependency
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-ASSET_VERSION = "20260702-prefetch2"
+ASSET_VERSION = "20260702-fast-add"
 
 if settings.sentry_dsn and sentry_sdk:
     sentry_sdk.init(dsn=settings.sentry_dsn, environment=settings.environment)
@@ -684,14 +684,30 @@ async def add_playlist(
     _csrf: None = Depends(require_csrf),
 ) -> PlaylistAddResponse:
     try:
-        metadata = await extract_playlist_metadata(payload.url)
-        playlist = await crud.upsert_playlist_from_metadata(session, current_user, metadata)
+        playlist_url = canonicalize_playlist_url(payload.url)
+        yt_playlist_id = extract_playlist_id_from_url(playlist_url)
+        playlist, created = await crud.get_or_create_pending_playlist(
+            session,
+            current_user,
+            yt_playlist_id=yt_playlist_id,
+            url=playlist_url,
+        )
+        if settings.use_celery_tasks:
+            task = await asyncio.to_thread(
+                enqueue_metadata_import,
+                playlist.id,
+                current_user.id,
+                playlist.title,
+            )
+        else:
+            task = enqueue_metadata_import(playlist.id, current_user.id, playlist.title)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed to add playlist")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    return PlaylistAddResponse(status="ok", message="Playlist archived", playlist_id=playlist.id)
+    message = "Playlist added; importing metadata" if created else "Playlist already exists; refreshing metadata"
+    return PlaylistAddResponse(status="ok", message=message, playlist_id=playlist.id, task_id=task.task_id)
 
 
 @app.post("/playlist/{playlist_id}/sync", response_model=TaskResponse)

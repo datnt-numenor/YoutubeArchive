@@ -33,6 +33,7 @@ class BaseResponse(BaseModel):
 
 class PlaylistAddResponse(BaseResponse):
     playlist_id: int | None = None
+    task_id: str | None = None
 
 
 class TaskResponse(BaseModel):

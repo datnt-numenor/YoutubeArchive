@@ -51,6 +51,14 @@ def canonicalize_playlist_url(url: str) -> str:
     return url
 
 
+def extract_playlist_id_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    playlist_ids = parse_qs(parsed.query).get("list")
+    if not playlist_ids or not playlist_ids[0].strip():
+        raise DownloaderError("Use a public YouTube playlist URL that includes a list= playlist id.")
+    return playlist_ids[0].strip()
+
+
 def _best_thumbnail(entry: dict[str, Any]) -> str | None:
     thumbnails = entry.get("thumbnails") or []
     if thumbnails:

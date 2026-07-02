@@ -1,7 +1,8 @@
 from types import SimpleNamespace
 
-from main import active_tasks, collect_system_status
+from main import active_tasks, add_playlist, collect_system_status
 from models import Playlist, PlaylistVideo, User, Video, VideoStatus
+from schemas import PlaylistAddRequest
 import tasks
 
 
@@ -44,3 +45,31 @@ async def test_collect_system_status_reports_counts(session, monkeypatch) -> Non
         "videos": 1,
         "saved_media": 1,
     }
+
+
+async def test_add_playlist_returns_quick_pending_playlist(session, monkeypatch) -> None:
+    owner = User(id="owner-1", email="owner@example.com", playlist_quota=10)
+    session.add(owner)
+    await session.commit()
+    await session.refresh(owner)
+    enqueued = []
+
+    def fake_enqueue(playlist_id: int, owner_id: str, playlist_title: str):
+        enqueued.append((playlist_id, owner_id, playlist_title))
+        return SimpleNamespace(task_id="task-1")
+
+    monkeypatch.setattr("main.enqueue_metadata_import", fake_enqueue)
+    monkeypatch.setattr("main.settings.task_backend", "local")
+
+    response = await add_playlist.__wrapped__(
+        request=None,
+        payload=PlaylistAddRequest(url="https://www.youtube.com/watch?v=abc123&list=PL_FAST_ADD"),
+        session=session,
+        current_user=owner,
+        _csrf=None,
+    )
+
+    assert response.playlist_id is not None
+    assert response.task_id == "task-1"
+    assert response.message == "Playlist added; importing metadata"
+    assert enqueued == [(response.playlist_id, owner.id, "Importing playlist PL_FAST_ADD")]

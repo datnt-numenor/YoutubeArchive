@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 TaskState = Literal["queued", "running", "done", "failed"]
 ACTIVE_TASK_STATES = {"queued", "running"}
+METADATA_IMPORT_FORMAT = "metadata"
 
 
 @dataclass
@@ -419,6 +420,31 @@ async def sync_playlist(session: AsyncSession, playlist: Playlist, owner: User, 
         _update_task(task_id, status="done", progress=100, completed=completed, failed=failed, current_video="Finished")
 
 
+async def import_playlist_metadata(session: AsyncSession, playlist: Playlist, task_id: str | None = None) -> None:
+    if task_id:
+        _update_task(task_id, status="running", progress=5, current_video="Reading playlist metadata")
+
+    metadata = await extract_playlist_metadata(playlist.url)
+    await crud.sync_playlist_metadata(session, playlist, metadata)
+    video_count = len(metadata.get("videos") or [])
+    if task_id:
+        _update_task(
+            task_id,
+            status="done",
+            progress=100,
+            total=video_count,
+            completed=video_count,
+            failed=0,
+            current_video="Metadata imported",
+        )
+
+
+async def import_playlist_metadata_by_id(playlist_id: int, owner_id: str, task_id: str | None = None) -> None:
+    async with AsyncSessionLocal() as session:
+        playlist = await crud.get_playlist_for_owner(session, playlist_id, owner_id)
+        await import_playlist_metadata(session, playlist, task_id)
+
+
 async def sync_playlist_by_id(playlist_id: int, owner_id: str | None = None, format_: str = "mp3", task_id: str | None = None) -> None:
     async with AsyncSessionLocal() as session:
         if owner_id:
@@ -456,11 +482,38 @@ def enqueue_local_sync(playlist_id: int, owner_id: str, playlist_title: str, for
     return progress
 
 
+def enqueue_local_metadata_import(playlist_id: int, owner_id: str, playlist_title: str) -> TaskProgress:
+    existing = find_active_task(playlist_id, owner_id, METADATA_IMPORT_FORMAT)
+    if existing:
+        return existing
+
+    progress = create_task_status(playlist_id, owner_id, playlist_title, METADATA_IMPORT_FORMAT)
+
+    async def runner() -> None:
+        try:
+            await import_playlist_metadata_by_id(playlist_id, owner_id, progress.task_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Metadata import task failed")
+            _update_task(progress.task_id, status="failed", error=str(exc))
+
+    asyncio.create_task(runner())
+    return progress
+
+
 def _send_celery_sync_task(playlist_id: int, owner_id: str, format_: str, task_id: str) -> None:
     from worker import sync_playlist_task
 
     sync_playlist_task.apply_async(
         args=[playlist_id, owner_id, format_, task_id],
+        task_id=task_id,
+    )
+
+
+def _send_celery_metadata_import_task(playlist_id: int, owner_id: str, task_id: str) -> None:
+    from worker import import_playlist_metadata_task
+
+    import_playlist_metadata_task.apply_async(
+        args=[playlist_id, owner_id, task_id],
         task_id=task_id,
     )
 
@@ -485,7 +538,33 @@ def enqueue_celery_sync(playlist_id: int, owner_id: str, playlist_title: str, fo
     return progress
 
 
+def enqueue_celery_metadata_import(playlist_id: int, owner_id: str, playlist_title: str) -> TaskProgress:
+    progress: TaskProgress | None = None
+    try:
+        existing = find_active_task(playlist_id, owner_id, METADATA_IMPORT_FORMAT)
+        if existing:
+            return existing
+
+        progress = create_task_status(playlist_id, owner_id, playlist_title, METADATA_IMPORT_FORMAT)
+        _send_celery_metadata_import_task(playlist_id, owner_id, progress.task_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to enqueue Celery metadata import task")
+        if progress:
+            try:
+                _update_task(progress.task_id, status="failed", error=str(exc) or exc.__class__.__name__)
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to mark Celery metadata import task as failed")
+        raise RuntimeError("Unable to enqueue metadata import task with Celery/Redis") from exc
+    return progress
+
+
 def enqueue_sync(playlist_id: int, owner_id: str, playlist_title: str, format_: str) -> TaskProgress:
     if settings.use_celery_tasks:
         return enqueue_celery_sync(playlist_id, owner_id, playlist_title, format_)
     return enqueue_local_sync(playlist_id, owner_id, playlist_title, format_)
+
+
+def enqueue_metadata_import(playlist_id: int, owner_id: str, playlist_title: str) -> TaskProgress:
+    if settings.use_celery_tasks:
+        return enqueue_celery_metadata_import(playlist_id, owner_id, playlist_title)
+    return enqueue_local_metadata_import(playlist_id, owner_id, playlist_title)

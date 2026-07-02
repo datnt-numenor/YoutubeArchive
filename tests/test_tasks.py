@@ -77,6 +77,24 @@ def test_enqueue_sync_reuses_existing_active_task(monkeypatch) -> None:
     assert len(created_coroutines) == 1
 
 
+def test_enqueue_metadata_import_reuses_existing_active_task(monkeypatch) -> None:
+    created_coroutines = []
+
+    def fake_create_task(coro):
+        created_coroutines.append(coro)
+        coro.close()
+        return object()
+
+    monkeypatch.setattr(tasks.asyncio, "create_task", fake_create_task)
+
+    first = tasks.enqueue_local_metadata_import(playlist_id=1, owner_id="owner-1", playlist_title="Importing")
+    second = tasks.enqueue_local_metadata_import(playlist_id=1, owner_id="owner-1", playlist_title="Importing")
+
+    assert first is second
+    assert first.format == tasks.METADATA_IMPORT_FORMAT
+    assert len(created_coroutines) == 1
+
+
 def test_redis_task_store_tracks_active_and_finished_tasks(monkeypatch) -> None:
     fake_redis = FakeRedis()
     monkeypatch.setattr(tasks.settings, "task_backend", "celery")
@@ -147,3 +165,22 @@ def test_enqueue_sync_uses_celery_backend_and_reuses_active_task(monkeypatch) ->
 
     assert first.task_id == second.task_id
     assert sent_tasks == [(1, "owner-1", "mp3", first.task_id)]
+
+
+def test_enqueue_metadata_import_uses_celery_backend_and_reuses_active_task(monkeypatch) -> None:
+    fake_redis = FakeRedis()
+    sent_tasks = []
+
+    def fake_send(playlist_id: int, owner_id: str, task_id: str) -> None:
+        sent_tasks.append((playlist_id, owner_id, task_id))
+
+    monkeypatch.setattr(tasks.settings, "task_backend", "celery")
+    monkeypatch.setattr(tasks, "_redis_client", lambda: fake_redis)
+    monkeypatch.setattr(tasks, "_send_celery_metadata_import_task", fake_send)
+
+    first = tasks.enqueue_metadata_import(playlist_id=1, owner_id="owner-1", playlist_title="Importing")
+    second = tasks.enqueue_metadata_import(playlist_id=1, owner_id="owner-1", playlist_title="Importing")
+
+    assert first.task_id == second.task_id
+    assert first.format == tasks.METADATA_IMPORT_FORMAT
+    assert sent_tasks == [(1, "owner-1", first.task_id)]

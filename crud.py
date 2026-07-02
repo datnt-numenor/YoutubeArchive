@@ -152,6 +152,44 @@ async def upsert_playlist_from_metadata(session: AsyncSession, owner: User, meta
     return playlist
 
 
+async def get_or_create_pending_playlist(
+    session: AsyncSession,
+    owner: User,
+    *,
+    yt_playlist_id: str,
+    url: str,
+) -> tuple[Playlist, bool]:
+    result = await session.execute(
+        select(Playlist).where(
+            Playlist.owner_id == owner.id,
+            Playlist.yt_playlist_id == yt_playlist_id,
+        )
+    )
+    playlist = result.scalar_one_or_none()
+    if playlist:
+        if playlist.url != url:
+            playlist.url = url
+            await session.commit()
+            await session.refresh(playlist)
+        return playlist, False
+
+    total = await count_user_playlists(session, owner.id)
+    if total >= owner.playlist_quota:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Playlist quota exceeded")
+
+    short_id = yt_playlist_id[:12] if len(yt_playlist_id) > 12 else yt_playlist_id
+    playlist = Playlist(
+        owner_id=owner.id,
+        yt_playlist_id=yt_playlist_id,
+        title=f"Importing playlist {short_id}",
+        url=url,
+    )
+    session.add(playlist)
+    await session.commit()
+    await session.refresh(playlist)
+    return playlist, True
+
+
 async def sync_playlist_metadata(session: AsyncSession, playlist: Playlist, metadata: dict[str, Any]) -> Playlist:
     current_yt_ids = {video["yt_video_id"] for video in metadata["videos"]}
     playlist.title = metadata["title"]

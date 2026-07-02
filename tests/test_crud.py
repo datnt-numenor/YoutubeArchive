@@ -69,6 +69,31 @@ async def test_list_playlists_counts_videos_without_loading_detail_rows(session)
     assert playlists[0].video_count == 2
 
 
+async def test_get_or_create_pending_playlist_returns_quick_placeholder(session) -> None:
+    owner = User(email="owner@example.com", playlist_quota=10)
+    session.add(owner)
+    await session.commit()
+    await session.refresh(owner)
+
+    playlist, created = await crud.get_or_create_pending_playlist(
+        session,
+        owner,
+        yt_playlist_id="PL_FAST_ADD",
+        url="https://www.youtube.com/playlist?list=PL_FAST_ADD",
+    )
+    existing, created_again = await crud.get_or_create_pending_playlist(
+        session,
+        owner,
+        yt_playlist_id="PL_FAST_ADD",
+        url="https://www.youtube.com/playlist?list=PL_FAST_ADD",
+    )
+
+    assert created is True
+    assert playlist.id == existing.id
+    assert created_again is False
+    assert playlist.title == "Importing playlist PL_FAST_ADD"
+
+
 async def test_mark_unavailable_sets_deleted_status_and_error(session) -> None:
     owner = User(email="owner@example.com")
     playlist = Playlist(owner=owner, yt_playlist_id="playlist123", title="Playlist", url="https://example.com")

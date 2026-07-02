@@ -365,11 +365,12 @@ async function pollTask(taskId) {
     while (!done) {
         const task = await requestJson(`/task/${taskId}/status`, { timeoutMs: 3000 });
         if (task.status === "done") {
+            invalidatePageCache();
             if (Number(task.failed || 0) > 0) {
                 showToast(`Sync done: ${task.completed} downloaded, ${task.failed} failed`, "warning");
                 window.setTimeout(() => refreshCurrentPage(), 1200);
             } else {
-                showToast("Sync completed");
+                showToast(task.format === "metadata" ? "Metadata imported" : "Sync completed");
                 window.setTimeout(() => refreshCurrentPage(), 700);
             }
             done = true;
@@ -688,7 +689,7 @@ async function navigateTo(url, options = {}) {
 
 async function refreshCurrentPage() {
     try {
-        await navigateTo(window.location.href, { push: false, scrollToTop: false });
+        await navigateTo(window.location.href, { push: false, scrollToTop: false, useCache: false });
     } catch (error) {
         console.warn("Soft refresh failed; falling back to full reload", error);
         window.location.reload();
@@ -699,6 +700,12 @@ document.addEventListener("submit", async (event) => {
     if (event.target.id === "addPlaylistForm") {
         event.preventDefault();
         const input = document.getElementById("playlistUrl");
+        const button = event.target.querySelector('button[type="submit"]');
+        const originalButtonHtml = button?.innerHTML;
+        if (button) {
+            button.disabled = true;
+            button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>Adding...';
+        }
         try {
             const data = await requestJson("/playlist/add", {
                 method: "POST",
@@ -706,13 +713,18 @@ document.addEventListener("submit", async (event) => {
             });
             invalidatePageCache();
             showToast(data.message || "Playlist added");
-            window.setTimeout(() => {
-                navigateTo(`/playlist/${data.playlist_id}`).catch(() => {
-                    window.location.href = `/playlist/${data.playlist_id}`;
-                });
-            }, 700);
+            await refreshActiveDownloads();
+            await navigateTo(`/playlist/${data.playlist_id}`, { useCache: false });
+            if (data.task_id) {
+                pollTask(data.task_id).catch((error) => showToast(error.message, "danger"));
+            }
         } catch (error) {
             showToast(error.message, "danger");
+        } finally {
+            if (button) {
+                button.disabled = false;
+                button.innerHTML = originalButtonHtml;
+            }
         }
     }
 

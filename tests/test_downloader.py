@@ -9,6 +9,12 @@ def test_canonicalize_watch_playlist_url() -> None:
     assert downloader.canonicalize_playlist_url(url) == "https://www.youtube.com/playlist?list=PL_TEST_123"
 
 
+def test_extract_playlist_id_from_url() -> None:
+    url = "https://www.youtube.com/watch?v=abc123&list=PL_TEST_123&index=2"
+
+    assert downloader.extract_playlist_id_from_url(url) == "PL_TEST_123"
+
+
 def test_existing_mp3_is_reused_and_temporary_files_are_cleaned(tmp_path: Path) -> None:
     mp3 = tmp_path / "video123.mp3"
     mp3.write_bytes(b"mp3")
