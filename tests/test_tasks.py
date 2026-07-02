@@ -1,4 +1,5 @@
 import tasks
+from redis.exceptions import RedisError
 
 
 class FakeRedis:
@@ -31,8 +32,14 @@ class FakeRedis:
         self.values.pop(key, None)
 
 
+class FailingRedis:
+    def smembers(self, _key: str):
+        raise RedisError("redis unavailable")
+
+
 def setup_function() -> None:
     tasks.task_registry.clear()
+    tasks._redis = None
 
 
 def test_unavailable_error_detection() -> None:
@@ -95,6 +102,32 @@ def test_redis_task_store_tracks_active_and_finished_tasks(monkeypatch) -> None:
     tasks._update_task(progress.task_id, status="done", progress=100)
 
     assert tasks.find_active_task(1, "owner-1", "mp3") is None
+    assert tasks.list_task_statuses(owner_id="owner-1") == []
+
+
+def test_redis_client_uses_short_timeouts(monkeypatch) -> None:
+    captured_kwargs = {}
+
+    def fake_from_url(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return FakeRedis()
+
+    monkeypatch.setattr(tasks.settings, "task_backend", "celery")
+    monkeypatch.setattr(tasks.settings, "redis_socket_timeout_seconds", 1.25)
+    monkeypatch.setattr(tasks.settings, "redis_socket_connect_timeout_seconds", 0.75)
+    monkeypatch.setattr(tasks.Redis, "from_url", fake_from_url)
+
+    assert isinstance(tasks._redis_client(), FakeRedis)
+    assert captured_kwargs["socket_timeout"] == 1.25
+    assert captured_kwargs["socket_connect_timeout"] == 0.75
+    assert captured_kwargs["health_check_interval"] == 30
+    assert captured_kwargs["retry_on_timeout"] is False
+
+
+def test_redis_task_listing_fails_fast_to_empty(monkeypatch) -> None:
+    monkeypatch.setattr(tasks.settings, "task_backend", "celery")
+    monkeypatch.setattr(tasks, "_redis_client", lambda: FailingRedis())
+
     assert tasks.list_task_statuses(owner_id="owner-1") == []
 
 

@@ -26,19 +26,33 @@ function readCookie(name) {
         ?.slice(prefix.length) || "";
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, {
+            ...options,
+            signal: options.signal || controller.signal,
+        });
+    } finally {
+        window.clearTimeout(timeout);
+    }
+}
+
 async function requestJson(url, options = {}) {
     const method = String(options.method || "GET").toUpperCase();
+    const { timeoutMs = 12000, headers: optionHeaders = {}, ...fetchOptions } = options;
     const csrfCookieName = document.querySelector('meta[name="csrf-cookie-name"]')?.content || "ytarchive_csrf";
     const csrfHeaderName = document.querySelector('meta[name="csrf-header-name"]')?.content || "x-csrf-token";
     const csrfToken = method === "GET" ? "" : readCookie(csrfCookieName);
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url, {
         headers: {
             "Content-Type": "application/json",
             ...(csrfToken ? { [csrfHeaderName]: decodeURIComponent(csrfToken) } : {}),
-            ...(options.headers || {}),
+            ...optionHeaders,
         },
-        ...options,
-    });
+        ...fetchOptions,
+    }, timeoutMs);
     if (response.status === 401) {
         window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
         throw new Error("Authentication required");
@@ -146,7 +160,7 @@ async function refreshActiveDownloads() {
 
     activeDownloadsRefreshing = true;
     try {
-        const tasks = await requestJson("/tasks/active");
+        const tasks = await requestJson("/tasks/active", { timeoutMs: 2500 });
         renderActiveDownloads(tasks);
         return tasks;
     } catch (error) {
@@ -169,7 +183,7 @@ function scheduleActiveDownloadsPoll(delay = 8000) {
 async function pollTask(taskId) {
     let done = false;
     while (!done) {
-        const task = await requestJson(`/task/${taskId}/status`);
+        const task = await requestJson(`/task/${taskId}/status`, { timeoutMs: 3000 });
         if (task.status === "done") {
             if (Number(task.failed || 0) > 0) {
                 showToast(`Sync done: ${task.completed} downloaded, ${task.failed} failed`, "warning");
@@ -479,10 +493,10 @@ function collapseTopNav() {
 async function navigateTo(url, options = {}) {
     const { push = true, scrollToTop = true } = options;
     const nextUrl = new URL(url, window.location.href);
-    const response = await fetch(nextUrl.href, {
+    const response = await fetchWithTimeout(nextUrl.href, {
         credentials: "same-origin",
         headers: { "X-Requested-With": "fetch" },
-    });
+    }, 15000);
 
     const finalUrl = new URL(response.url || nextUrl.href, window.location.href);
     if (finalUrl.pathname === "/login" || finalUrl.pathname === "/register") {
@@ -509,8 +523,9 @@ async function navigateTo(url, options = {}) {
     }
     collapseTopNav();
     initPlaylistTools();
-    const tasks = await refreshActiveDownloads();
-    scheduleActiveDownloadsPoll(tasks.length ? 1500 : 8000);
+    refreshActiveDownloads()
+        .then((tasks) => scheduleActiveDownloadsPoll(tasks.length ? 1500 : 8000))
+        .catch(() => scheduleActiveDownloadsPoll(8000));
     if (scrollToTop) window.scrollTo(0, 0);
 }
 
@@ -574,7 +589,7 @@ document.addEventListener("click", async (event) => {
             });
             showToast("Sync queued");
             await refreshActiveDownloads();
-            await pollTask(data.task_id);
+            pollTask(data.task_id).catch((error) => showToast(error.message, "danger"));
         } catch (error) {
             showToast(error.message, "danger");
         } finally {

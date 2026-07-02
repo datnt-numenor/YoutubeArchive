@@ -31,6 +31,8 @@ class Settings(BaseSettings):
 
     database_url: str = DEFAULT_SQLITE_URL
     redis_url: str = "redis://localhost:6379/0"
+    redis_socket_timeout_seconds: float = Field(default=1.0, ge=0.1)
+    redis_socket_connect_timeout_seconds: float = Field(default=0.5, ge=0.1)
     task_backend: Literal["local", "celery"] | None = None
     task_status_ttl_seconds: int = 60 * 60 * 24
 

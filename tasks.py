@@ -8,8 +8,10 @@ from typing import Any, Literal
 
 try:
     from redis import Redis
+    from redis.exceptions import RedisError
 except ImportError:  # pragma: no cover - runtime dependency is declared in requirements
     Redis = None  # type: ignore[assignment]
+    RedisError = Exception  # type: ignore[assignment]
 
 try:
     import sentry_sdk
@@ -99,7 +101,14 @@ def _redis_client() -> Any | None:
 
     global _redis
     if _redis is None:
-        _redis = Redis.from_url(settings.redis_url, decode_responses=True)
+        _redis = Redis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_timeout=settings.redis_socket_timeout_seconds,
+            socket_connect_timeout=settings.redis_socket_connect_timeout_seconds,
+            health_check_interval=30,
+            retry_on_timeout=False,
+        )
     return _redis
 
 
@@ -130,7 +139,11 @@ def _load_redis_task(task_id: str) -> TaskProgress | None:
     if client is None:
         return None
 
-    payload = client.get(_task_key(task_id))
+    try:
+        payload = client.get(_task_key(task_id))
+    except RedisError:
+        logger.warning("Unable to load task status from Redis", exc_info=True)
+        return None
     if not payload:
         return None
     if isinstance(payload, bytes):
@@ -198,15 +211,19 @@ def list_task_statuses(owner_id: str | None = None, playlist_id: int | None = No
         client = _redis_client()
         if client is None:
             return []
-        task_ids: set[str] = set()
-        if owner_id is not None:
-            raw_task_ids = client.smembers(_owner_tasks_key(owner_id))
-            task_ids = {task_id.decode("utf-8") if isinstance(task_id, bytes) else task_id for task_id in raw_task_ids}
-        else:
-            for key in client.scan_iter(f"{TASK_KEY_PREFIX}*"):
-                key_text = key.decode("utf-8") if isinstance(key, bytes) else key
-                task_ids.add(key_text.removeprefix(TASK_KEY_PREFIX))
-        tasks = [task for task_id in task_ids if (task := _load_redis_task(task_id))]
+        try:
+            task_ids: set[str] = set()
+            if owner_id is not None:
+                raw_task_ids = client.smembers(_owner_tasks_key(owner_id))
+                task_ids = {task_id.decode("utf-8") if isinstance(task_id, bytes) else task_id for task_id in raw_task_ids}
+            else:
+                for key in client.scan_iter(f"{TASK_KEY_PREFIX}*"):
+                    key_text = key.decode("utf-8") if isinstance(key, bytes) else key
+                    task_ids.add(key_text.removeprefix(TASK_KEY_PREFIX))
+            tasks = [task for task_id in task_ids if (task := _load_redis_task(task_id))]
+        except RedisError:
+            logger.warning("Unable to list active task statuses from Redis", exc_info=True)
+            return []
     else:
         tasks = list(task_registry.values())
 
@@ -224,15 +241,19 @@ def find_active_task(playlist_id: int, owner_id: str, format_: str) -> TaskProgr
         if client is None:
             return None
 
-        active_key = _active_task_key(playlist_id, owner_id, format_)
-        task_id = client.get(active_key)
-        if isinstance(task_id, bytes):
-            task_id = task_id.decode("utf-8")
-        if task_id:
-            task = _load_redis_task(task_id)
-            if task and task.status in ACTIVE_TASK_STATES:
-                return task
-            client.delete(active_key)
+        try:
+            active_key = _active_task_key(playlist_id, owner_id, format_)
+            task_id = client.get(active_key)
+            if isinstance(task_id, bytes):
+                task_id = task_id.decode("utf-8")
+            if task_id:
+                task = _load_redis_task(task_id)
+                if task and task.status in ACTIVE_TASK_STATES:
+                    return task
+                client.delete(active_key)
+        except RedisError:
+            logger.warning("Unable to find active task in Redis", exc_info=True)
+            return None
 
         for task in list_task_statuses(owner_id=owner_id, playlist_id=playlist_id):
             if task.format == format_ and task.status in ACTIVE_TASK_STATES:

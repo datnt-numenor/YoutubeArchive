@@ -78,6 +78,8 @@ For real users, run sync/download work in Celery instead of the FastAPI process:
 ENVIRONMENT=production
 TASK_BACKEND=celery
 REDIS_URL=redis://localhost:6379/0
+REDIS_SOCKET_TIMEOUT_SECONDS=1
+REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS=0.5
 ```
 
 Start the web process and worker as separate services:
@@ -93,7 +95,7 @@ On Windows development machines, Celery may need the solo pool:
 celery -A worker.celery_app worker --loglevel=info --pool=solo
 ```
 
-Task status is stored in Redis for `TASK_STATUS_TTL_SECONDS` so `/tasks/active`, `/task/{task_id}/status`, and the global Downloading panel keep working across web processes.
+Task status is stored in Redis for `TASK_STATUS_TTL_SECONDS` so `/tasks/active`, `/task/{task_id}/status`, and the global Downloading panel keep working across web processes. Keep Redis socket timeouts short so a Redis hiccup does not make page navigation feel stuck.
 
 ## Rate limiting
 

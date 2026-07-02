@@ -63,7 +63,7 @@ except ImportError:  # pragma: no cover - optional production dependency
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-ASSET_VERSION = "20260701-latency"
+ASSET_VERSION = "20260702-latency"
 
 if settings.sentry_dsn and sentry_sdk:
     sentry_sdk.init(dsn=settings.sentry_dsn, environment=settings.environment)
@@ -158,7 +158,14 @@ def storage_configured() -> bool:
 def redis_health_check() -> tuple[bool, str]:
     if not settings.use_celery_tasks:
         return True, "Local task registry"
-    client = Redis.from_url(settings.redis_url, decode_responses=True)
+    client = Redis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_timeout=settings.redis_socket_timeout_seconds,
+        socket_connect_timeout=settings.redis_socket_connect_timeout_seconds,
+        health_check_interval=30,
+        retry_on_timeout=False,
+    )
     try:
         return bool(client.ping()), "Redis reachable"
     except RedisError as exc:
@@ -189,7 +196,7 @@ async def collect_system_status(session: AsyncSession, include_counts: bool = Fa
         logger.exception("Database health check failed")
         checks["database"] = {"ok": False, "label": "Unavailable", "detail": str(exc)}
 
-    task_ok, task_detail = redis_health_check()
+    task_ok, task_detail = await asyncio.to_thread(redis_health_check)
     checks["tasks"] = {
         "ok": task_ok,
         "label": settings.resolved_task_backend,
@@ -593,7 +600,7 @@ async def admin_page(
     current_user: User = Depends(require_superuser),
 ):
     users = await crud.list_admin_users(session)
-    active_task_list = list_task_statuses()
+    active_task_list = await asyncio.to_thread(list_task_statuses)
     system_status = await collect_system_status(session, include_counts=True)
     return render_template(
         request,
@@ -699,7 +706,10 @@ async def sync_playlist(
 ) -> TaskResponse:
     playlist = await crud.get_playlist_for_owner(session, playlist_id, current_user.id)
     try:
-        task = enqueue_sync(playlist_id, current_user.id, playlist.title, payload.format)
+        if settings.use_celery_tasks:
+            task = await asyncio.to_thread(enqueue_sync, playlist_id, current_user.id, playlist.title, payload.format)
+        else:
+            task = enqueue_sync(playlist_id, current_user.id, playlist.title, payload.format)
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     return TaskResponse(task_id=task.task_id, status=task.status, message="Sync task queued")
@@ -763,7 +773,7 @@ async def task_status(
     task_id: str,
     current_user: User = Depends(get_current_user),
 ) -> TaskStatusResponse:
-    task = get_task_status(task_id)
+    task = await asyncio.to_thread(get_task_status, task_id)
     if not task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
     if task.owner_id != current_user.id:
@@ -778,7 +788,7 @@ async def active_tasks(
     playlist_id: int | None = None,
     current_user: User = Depends(get_current_user),
 ) -> list[TaskStatusResponse]:
-    tasks = list_task_statuses(owner_id=current_user.id, playlist_id=playlist_id)
+    tasks = await asyncio.to_thread(list_task_statuses, owner_id=current_user.id, playlist_id=playlist_id)
     return [TaskStatusResponse(**task.to_dict()) for task in tasks]
 
 
@@ -789,7 +799,7 @@ async def task_stream(
     task_id: str,
     current_user: User = Depends(get_current_user),
 ):
-    existing_task = get_task_status(task_id)
+    existing_task = await asyncio.to_thread(get_task_status, task_id)
     if not existing_task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
     if existing_task.owner_id != current_user.id:
@@ -797,7 +807,7 @@ async def task_stream(
 
     async def events():
         while True:
-            task = get_task_status(task_id)
+            task = await asyncio.to_thread(get_task_status, task_id)
             if not task:
                 yield "event: error\ndata: {\"error\":\"Task not found\"}\n\n"
                 return
