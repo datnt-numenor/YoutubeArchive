@@ -54,7 +54,9 @@ async function requestJson(url, options = {}) {
         ...fetchOptions,
     }, timeoutMs);
     if (response.status === 401) {
-        window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+        if (!isLoggingOut) {
+            window.location.href = `/login?next=${encodeURIComponent(window.location.pathname)}`;
+        }
         throw new Error("Authentication required");
     }
     const data = await response.json().catch(() => ({}));
@@ -70,6 +72,7 @@ const PAGE_CACHE_TTL_MS = 30_000;
 const PAGE_CACHE_MAX_ENTRIES = 16;
 const PAGE_PREFETCH_LIMIT = 8;
 const PAGE_PREFETCH_START_DELAY_MS = 180;
+let isLoggingOut = false;
 
 function navigationKey(url) {
     const normalized = new URL(url, window.location.href);
@@ -85,6 +88,10 @@ function isCacheableNavigationUrl(url) {
     if (nextUrl.pathname.startsWith("/api/")) return false;
     if (nextUrl.pathname === "/login" || nextUrl.pathname === "/register") return false;
     return true;
+}
+
+function hasAuthenticatedShell() {
+    return Boolean(document.getElementById("activeDownloads"));
 }
 
 function trimPageCache() {
@@ -115,7 +122,7 @@ function storePageSnapshot(snapshot) {
 
 function storeCurrentPageSnapshot() {
     const currentContent = document.getElementById("pageContent");
-    if (!currentContent || !isCacheableNavigationUrl(window.location.href)) return;
+    if (!currentContent || !hasAuthenticatedShell() || !isCacheableNavigationUrl(window.location.href)) return;
     storePageSnapshot({
         key: navigationKey(window.location.href),
         finalUrl: window.location.href,
@@ -145,7 +152,7 @@ function buildPageSnapshot(response, html, requestedUrl) {
 }
 
 async function fetchPageSnapshot(url, options = {}) {
-    const { force = false } = options;
+    const { force = false, navigateOnAuthRedirect = false } = options;
     const nextUrl = new URL(url, window.location.href);
     if (!isCacheableNavigationUrl(nextUrl)) return null;
 
@@ -167,7 +174,9 @@ async function fetchPageSnapshot(url, options = {}) {
         const html = await response.text();
         const snapshot = buildPageSnapshot(response, html, nextUrl);
         if (snapshot?.redirectUrl) {
-            window.location.href = snapshot.redirectUrl;
+            if (navigateOnAuthRedirect) {
+                window.location.href = snapshot.redirectUrl;
+            }
             return null;
         }
         if (snapshot) storePageSnapshot(snapshot);
@@ -181,6 +190,7 @@ async function fetchPageSnapshot(url, options = {}) {
 }
 
 function scheduleActiveDownloadsRefresh(delay = 450) {
+    if (!hasAuthenticatedShell()) return;
     window.setTimeout(() => {
         refreshActiveDownloads()
             .then((tasks) => scheduleActiveDownloadsPoll(tasks.length ? 1500 : 8000))
@@ -212,6 +222,7 @@ function linkFromEvent(event) {
 }
 
 function prefetchNavigationUrl(url, options = {}) {
+    if (!hasAuthenticatedShell() || isLoggingOut) return Promise.resolve(null);
     const nextUrl = new URL(url, window.location.href);
     if (navigationKey(nextUrl) === navigationKey(window.location.href)) return Promise.resolve(null);
     return fetchPageSnapshot(nextUrl, options).catch((error) => {
@@ -221,7 +232,9 @@ function prefetchNavigationUrl(url, options = {}) {
 }
 
 function scheduleNavigationPrefetch() {
+    if (!hasAuthenticatedShell() || isLoggingOut) return;
     const run = () => {
+        if (!hasAuthenticatedShell() || isLoggingOut) return;
         const seen = new Set();
         const links = Array.from(document.querySelectorAll(".navbar a[href], #pageContent a[href]"));
         const candidates = links
@@ -242,6 +255,16 @@ function scheduleNavigationPrefetch() {
     };
 
     window.setTimeout(run, PAGE_PREFETCH_START_DELAY_MS);
+}
+
+function stopBackgroundNavigationWork() {
+    isLoggingOut = true;
+    invalidatePageCache();
+    if (activeDownloadsPollTimer) {
+        window.clearTimeout(activeDownloadsPollTimer);
+        activeDownloadsPollTimer = null;
+    }
+    pagePrefetches.clear();
 }
 
 function escapeHtml(value) {
@@ -650,6 +673,7 @@ function initPlaylistTools() {
 
 function shouldHandleSoftNavigation(event, link) {
     if (!link || event.defaultPrevented || event.button !== 0) return false;
+    if (!hasAuthenticatedShell() || isLoggingOut) return false;
     if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return false;
     if (link.target && link.target !== "_self") return false;
     if (link.hasAttribute("download") || link.dataset.noSoftNav !== undefined) return false;
@@ -681,7 +705,7 @@ async function navigateTo(url, options = {}) {
         return;
     }
 
-    const snapshot = await fetchPageSnapshot(nextUrl);
+    const snapshot = await fetchPageSnapshot(nextUrl, { navigateOnAuthRedirect: true });
     if (!snapshot || !renderPageSnapshot(snapshot, { push, scrollToTop })) {
         window.location.href = nextUrl.href;
     }
@@ -697,6 +721,11 @@ async function refreshCurrentPage() {
 }
 
 document.addEventListener("submit", async (event) => {
+    if (event.target.matches('form[action="/logout"]')) {
+        stopBackgroundNavigationWork();
+        return;
+    }
+
     if (event.target.id === "addPlaylistForm") {
         event.preventDefault();
         const input = document.getElementById("playlistUrl");
@@ -811,6 +840,7 @@ document.addEventListener("click", async (event) => {
 
 ["pointerover", "focusin", "touchstart", "mousedown"].forEach((eventName) => {
     document.addEventListener(eventName, (event) => {
+        if (!hasAuthenticatedShell() || isLoggingOut) return;
         const link = linkFromEvent(event);
         if (!link || !isCacheableNavigationUrl(link.href)) return;
         prefetchNavigationUrl(link.href);
