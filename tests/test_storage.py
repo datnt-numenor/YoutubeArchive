@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import boto3
+
 import tasks
 from storage import S3Storage
 
@@ -49,3 +51,22 @@ async def test_s3_storage_generates_presigned_url(monkeypatch) -> None:
     url = await storage.get_file_url("users/owner/playlists/1/song.mp3")
 
     assert url == "https://cdn.example.test/ytarchive-test/users/owner/playlists/1/song.mp3?method=get_object&ttl=123"
+
+
+def test_s3_storage_client_uses_r2_compatible_signature(monkeypatch) -> None:
+    captured_kwargs = {}
+
+    def fake_boto3_client(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return FakeS3Client()
+
+    monkeypatch.setattr(boto3, "client", fake_boto3_client)
+    monkeypatch.setattr("storage.settings.s3_endpoint_url", "https://example.r2.cloudflarestorage.com")
+    monkeypatch.setattr("storage.settings.s3_access_key_id", "access-key")
+    monkeypatch.setattr("storage.settings.s3_secret_access_key", "secret-key")
+
+    storage = S3Storage(bucket_name="ytarchive-test")
+
+    assert isinstance(storage.client, FakeS3Client)
+    assert captured_kwargs["region_name"] == "auto"
+    assert captured_kwargs["config"].signature_version == "s3v4"

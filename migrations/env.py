@@ -54,6 +54,7 @@ async def run_async_migrations() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        connect_args={"statement_cache_size": 0} if settings.database_url.startswith("postgresql") else {},
     )
 
     async with connectable.connect() as connection:

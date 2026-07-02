@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 from sqlalchemy import text
 
@@ -48,7 +49,16 @@ async def check_s3(write_object: bool) -> None:
     url = await storage.get_file_url(test_key)
     if not url.startswith(("http://", "https://")):
         raise RuntimeError("S3 presigned URL was not generated")
-    print("ok s3 presigned url")
+    if write_object:
+        request = Request(url, headers={"Range": "bytes=0-0"})
+        with urlopen(request, timeout=20) as response:
+            if response.status not in {200, 206}:
+                raise RuntimeError(f"S3 presigned URL fetch failed with HTTP {response.status}")
+            if not response.read(1):
+                raise RuntimeError("S3 presigned URL returned an empty body")
+        print("ok s3 presigned url fetch")
+    else:
+        print("ok s3 presigned url")
 
 
 async def main() -> None:

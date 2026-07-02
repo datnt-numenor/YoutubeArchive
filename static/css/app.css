@@ -43,6 +43,15 @@ body.has-player-bar {
     margin-bottom: 18px;
 }
 
+.panel-header.compact h2 {
+    font-size: 1.05rem;
+    margin: 0 0 4px;
+}
+
+.panel-header.compact p {
+    margin-bottom: 14px;
+}
+
 .section-heading,
 .detail-bar,
 .settings-grid {
@@ -282,6 +291,10 @@ body.has-player-bar {
     align-items: flex-start;
 }
 
+.settings-summary {
+    max-width: 880px;
+}
+
 .settings-form {
     min-width: min(440px, 100%);
 }
@@ -310,6 +323,75 @@ body.has-player-bar {
     gap: 6px;
     grid-template-columns: auto 88px 88px auto;
     justify-content: end;
+}
+
+.ops-grid {
+    display: grid;
+    gap: 16px;
+    grid-template-columns: minmax(0, 1.25fr) minmax(300px, .75fr);
+}
+
+.status-grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.status-card {
+    border-top: 1px solid var(--line);
+    padding-top: 10px;
+}
+
+.status-card strong,
+.status-card small {
+    display: block;
+}
+
+.status-card small {
+    color: var(--muted);
+    margin-top: 4px;
+}
+
+.config-list {
+    display: grid;
+    gap: 9px;
+}
+
+.config-list div {
+    align-items: baseline;
+    border-top: 1px solid var(--line);
+    display: grid;
+    gap: 10px;
+    grid-template-columns: 130px minmax(0, 1fr);
+    padding-top: 8px;
+}
+
+.config-list span {
+    color: var(--muted);
+    font-size: .84rem;
+}
+
+.config-list strong {
+    font-size: .92rem;
+    overflow-wrap: anywhere;
+}
+
+.stats-grid {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.stat-tile {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px;
+}
+
+.stat-tile strong {
+    display: block;
+    font-size: 1.35rem;
 }
 
 .global-player-bar {
@@ -387,6 +469,16 @@ body.has-player-bar .toast-container {
     .admin-user-form {
         grid-template-columns: 1fr 1fr;
         justify-content: stretch;
+    }
+
+    .ops-grid,
+    .status-grid,
+    .stats-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .config-list div {
+        grid-template-columns: 1fr;
     }
 
     .playlist-controls,

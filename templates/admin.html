@@ -9,6 +9,62 @@
         </div>
     </div>
 
+    <div class="ops-grid mb-4">
+        <div class="panel">
+            <div class="panel-header compact">
+                <h2>System status</h2>
+                <p>Live production checks for the public web app.</p>
+            </div>
+            <div class="status-grid">
+                {% for name, check in system_status.checks.items() %}
+                <div class="status-card">
+                    <span class="metric-label">{{ name.replace('_', ' ') }}</span>
+                    <strong class="{{ 'text-success' if check.ok else 'text-danger' }}">
+                        <i class="bi {{ 'bi-check-circle' if check.ok else 'bi-exclamation-triangle' }} me-1"></i>{{ check.label }}
+                    </strong>
+                    <small>{{ check.detail }}</small>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="panel">
+            <div class="panel-header compact">
+                <h2>Public config</h2>
+                <p>Safe-to-show deployment switches.</p>
+            </div>
+            <div class="config-list">
+                <div><span>Base URL</span><strong>{{ system_status.app_base_url }}</strong></div>
+                <div><span>Environment</span><strong>{{ system_status.environment }}</strong></div>
+                <div><span>Task backend</span><strong>{{ system_status.task_backend }}</strong></div>
+                <div><span>Storage</span><strong>{{ system_status.storage_backend }}</strong></div>
+                <div><span>Invite required</span><strong>{{ 'Yes' if system_status.invite_required else 'No' }}</strong></div>
+                <div><span>Email verification</span><strong>{{ 'Required' if system_status.email_verification_required else 'Off' }}</strong></div>
+                <div><span>Secure cookies</span><strong>{{ 'On' if system_status.secure_cookies else 'Off' }}</strong></div>
+                <div><span>SMTP</span><strong>{{ 'Configured' if system_status.smtp_configured else 'Log only' }}</strong></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="stats-grid mb-4">
+        <div class="stat-tile">
+            <span class="metric-label">Users</span>
+            <strong>{{ system_status.counts.users or 0 }}</strong>
+        </div>
+        <div class="stat-tile">
+            <span class="metric-label">Playlists</span>
+            <strong>{{ system_status.counts.playlists or 0 }}</strong>
+        </div>
+        <div class="stat-tile">
+            <span class="metric-label">Videos</span>
+            <strong>{{ system_status.counts.videos or 0 }}</strong>
+        </div>
+        <div class="stat-tile">
+            <span class="metric-label">Saved media</span>
+            <strong>{{ system_status.counts.saved_media or 0 }}</strong>
+        </div>
+    </div>
+
     <div class="table-shell mb-4">
         <table class="table align-middle mb-0">
             <thead>

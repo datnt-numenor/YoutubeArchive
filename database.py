@@ -11,7 +11,19 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_async_engine(settings.database_url, echo=False)
+_is_postgres = settings.database_url.startswith("postgresql")
+
+_engine_kwargs: dict = {"echo": False}
+if _is_postgres:
+    _engine_kwargs.update(
+        pool_size=5,
+        pool_recycle=300,
+        # Neon serverless PostgreSQL requires statement_cache_size=0 with asyncpg
+        # to avoid "prepared statement already exists" errors through their pooler.
+        connect_args={"statement_cache_size": 0},
+    )
+
+engine = create_async_engine(settings.database_url, **_engine_kwargs)
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 

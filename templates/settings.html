@@ -4,7 +4,7 @@
 <section class="settings-grid">
     <div>
         <h1>Settings</h1>
-        <p class="text-muted">Local scheduler uses APScheduler AsyncIOScheduler.</p>
+        <p class="text-muted">Scheduler, account status, and public access controls.</p>
     </div>
     <div class="panel">
         <form id="syncIntervalForm" class="settings-form">
@@ -23,6 +23,37 @@
                 <i class="bi bi-save me-1"></i>Save
             </button>
         </form>
+    </div>
+</section>
+
+<section class="settings-summary mt-4">
+    <div class="panel">
+        <div class="panel-header compact">
+            <h2>Account</h2>
+            <p>{{ user.email }}</p>
+        </div>
+        <div class="quota-grid">
+            <div>
+                <span class="metric-label">Storage</span>
+                <strong>{{ user.storage_used_bytes|bytes }}</strong>
+                <small>{{ storage_percent }}% of {{ user.storage_quota_bytes|bytes }}</small>
+            </div>
+            <div>
+                <span class="metric-label">Playlist quota</span>
+                <strong>{{ playlist_quota }}</strong>
+                <small>maximum saved playlists</small>
+            </div>
+            <div>
+                <span class="metric-label">Account</span>
+                <strong>{{ 'Verified' if user.is_verified else 'Unverified' }}</strong>
+                <small>{{ 'Admin' if user.is_superuser else 'Standard user' }}</small>
+            </div>
+            <div>
+                <span class="metric-label">Registration</span>
+                <strong>{{ 'Invite only' if invite_required else 'Open' }}</strong>
+                <small>{{ 'Email verification required' if email_verification_required else 'Email verification off' }}</small>
+            </div>
+        </div>
     </div>
 </section>
 {% endblock %}

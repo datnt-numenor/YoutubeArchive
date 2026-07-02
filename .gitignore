@@ -13,3 +13,5 @@ downloads/*
 uvicorn*.log
 cloudflared*.log
 localtunnel*.log
+ytarchive-smoke.txt
+

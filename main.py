@@ -7,13 +7,16 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from redis import Redis
+from redis.exceptions import RedisError
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import crud
@@ -38,7 +41,7 @@ from config import BASE_DIR, settings
 from database import get_session, init_db
 from downloader import extract_playlist_metadata
 from mailer import send_email
-from models import User
+from models import Playlist, PlaylistVideo, User, Video
 from scheduler import scheduler, shutdown_scheduler, start_scheduler
 from schemas import (
     BaseResponse,
@@ -60,6 +63,7 @@ except ImportError:  # pragma: no cover - optional production dependency
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+ASSET_VERSION = "20260701-latency"
 
 if settings.sentry_dsn and sentry_sdk:
     sentry_sdk.init(dsn=settings.sentry_dsn, environment=settings.environment)
@@ -76,7 +80,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
-limiter = Limiter(key_func=get_remote_address, headers_enabled=True)
+limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
@@ -127,6 +131,7 @@ def render_template(request: Request, template_name: str, context: dict[str, obj
         "csrf_token": csrf_token,
         "csrf_cookie_name": settings.csrf_cookie_name,
         "csrf_header_name": settings.csrf_header_name,
+        "asset_version": ASSET_VERSION,
     }
     response = templates.TemplateResponse(request, template_name, context, status_code=status_code)
     set_csrf_cookie(response, csrf_token)
@@ -137,6 +142,104 @@ async def read_form_fields(request: Request) -> dict[str, str]:
     body = (await request.body()).decode("utf-8")
     parsed = parse_qs(body, keep_blank_values=True)
     return {key: values[-1] if values else "" for key, values in parsed.items()}
+
+
+def storage_configured() -> bool:
+    if settings.resolved_storage_backend == "local":
+        return settings.downloads_dir.exists()
+    return bool(
+        settings.s3_endpoint_url
+        and settings.s3_bucket_name
+        and settings.s3_access_key_id
+        and settings.s3_secret_access_key
+    )
+
+
+def redis_health_check() -> tuple[bool, str]:
+    if not settings.use_celery_tasks:
+        return True, "Local task registry"
+    client = Redis.from_url(settings.redis_url, decode_responses=True)
+    try:
+        return bool(client.ping()), "Redis reachable"
+    except RedisError as exc:
+        return False, str(exc)
+    finally:
+        client.close()
+
+
+async def collect_system_status(session: AsyncSession, include_counts: bool = False) -> dict[str, object]:
+    checks: dict[str, dict[str, object]] = {}
+    counts: dict[str, int] = {}
+
+    try:
+        await session.execute(text("select 1"))
+        checks["database"] = {"ok": True, "label": "Connected", "detail": "Database query succeeded"}
+        if include_counts:
+            counts["users"] = int((await session.execute(select(func.count(User.id)))).scalar_one())
+            counts["playlists"] = int((await session.execute(select(func.count(Playlist.id)))).scalar_one())
+            counts["videos"] = int((await session.execute(select(func.count(Video.id)))).scalar_one())
+            counts["saved_media"] = int(
+                (
+                    await session.execute(
+                        select(func.count(PlaylistVideo.video_id)).where(PlaylistVideo.local_file_path.is_not(None))
+                    )
+                ).scalar_one()
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Database health check failed")
+        checks["database"] = {"ok": False, "label": "Unavailable", "detail": str(exc)}
+
+    task_ok, task_detail = redis_health_check()
+    checks["tasks"] = {
+        "ok": task_ok,
+        "label": settings.resolved_task_backend,
+        "detail": task_detail,
+    }
+
+    storage_ok = storage_configured()
+    checks["storage"] = {
+        "ok": storage_ok,
+        "label": settings.resolved_storage_backend,
+        "detail": "Configured" if storage_ok else "Missing storage configuration",
+    }
+
+    checks["public_auth"] = {
+        "ok": bool(settings.registration_invite_code) and settings.auth_cookie_secure_enabled,
+        "label": "Hardened" if settings.registration_invite_code else "Open registration",
+        "detail": "Invite code required" if settings.registration_invite_code else "Registration is open without invite code",
+    }
+
+    return {
+        "environment": settings.environment,
+        "app_base_url": settings.app_base_url,
+        "task_backend": settings.resolved_task_backend,
+        "storage_backend": settings.resolved_storage_backend,
+        "email_verification_required": settings.email_verification_required,
+        "invite_required": bool(settings.registration_invite_code),
+        "secure_cookies": settings.auth_cookie_secure_enabled,
+        "smtp_configured": bool(settings.smtp_host and settings.smtp_from_email),
+        "sentry_configured": bool(settings.sentry_dsn),
+        "checks": checks,
+        "counts": counts,
+    }
+
+
+@app.get("/healthz")
+async def healthz(session: AsyncSession = Depends(get_session)) -> JSONResponse:
+    system_status = await collect_system_status(session)
+    checks = system_status["checks"]
+    is_healthy = all(check["ok"] for check in checks.values())
+    payload = {
+        "status": "ok" if is_healthy else "degraded",
+        "checks": {
+            name: {
+                "ok": check["ok"],
+                "label": check["label"],
+            }
+            for name, check in checks.items()
+        },
+    }
+    return JSONResponse(payload, status_code=status.HTTP_200_OK if is_healthy else status.HTTP_503_SERVICE_UNAVAILABLE)
 
 
 @app.get("/login")
@@ -463,6 +566,9 @@ async def index(
 async def settings_page(request: Request, current_user: User | None = Depends(get_optional_user)):
     if not current_user:
         return login_redirect(request)
+    storage_percent = 0
+    if current_user.storage_quota_bytes:
+        storage_percent = min(100, round((current_user.storage_used_bytes / current_user.storage_quota_bytes) * 100))
     return render_template(
         request,
         "settings.html",
@@ -471,6 +577,10 @@ async def settings_page(request: Request, current_user: User | None = Depends(ge
             "app_name": settings.app_name,
             "user": current_user,
             "sync_interval_hours": settings.sync_interval_hours,
+            "storage_percent": storage_percent,
+            "playlist_quota": current_user.playlist_quota,
+            "invite_required": bool(settings.registration_invite_code),
+            "email_verification_required": settings.email_verification_required,
         },
     )
 
@@ -484,6 +594,7 @@ async def admin_page(
 ):
     users = await crud.list_admin_users(session)
     active_task_list = list_task_statuses()
+    system_status = await collect_system_status(session, include_counts=True)
     return render_template(
         request,
         "admin.html",
@@ -493,6 +604,7 @@ async def admin_page(
             "user": current_user,
             "users": users,
             "active_tasks": active_task_list,
+            "system_status": system_status,
         },
     )
 

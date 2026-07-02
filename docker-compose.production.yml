@@ -1,35 +1,50 @@
 services:
-  postgres:
-    image: postgres:16-alpine
+  web:
+    build: .
+    container_name: ytarchive-web
     restart: unless-stopped
-    environment:
-      POSTGRES_DB: ytarchive
-      POSTGRES_USER: ytarchive
-      POSTGRES_PASSWORD: change-this-postgres-password
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+    env_file: .env
     ports:
-      - "127.0.0.1:5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ytarchive -d ytarchive"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - downloads_data:/app/downloads
+
+  worker:
+    build: .
+    container_name: ytarchive-worker
+    restart: unless-stopped
+    env_file: .env
+    command: ["celery", "-A", "worker.celery_app", "worker", "--loglevel=info", "--concurrency=2"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - downloads_data:/app/downloads
 
   redis:
     image: redis:7-alpine
+    container_name: ytarchive-redis
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
-    ports:
-      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
 
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: ytarchive-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - web
+
 volumes:
-  postgres_data:
   redis_data:
+  downloads_data:

@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -8,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_SQLITE_URL = f"sqlite+aiosqlite:///{(BASE_DIR / 'ytarchive.db').as_posix()}"
+ENV_FILE = Path(os.environ.get("ENV_FILE", BASE_DIR / ".env"))
 
 
 class Settings(BaseSettings):
@@ -36,7 +38,8 @@ class Settings(BaseSettings):
     storage_backend: Literal["local", "s3"] | None = None
     default_user_email: str = "local@example.com"
     default_playlist_quota: int = 10
-    default_storage_quota_gb: int = 5
+    default_storage_quota_gb: int = 1
+    default_admin_storage_quota_gb: int = 5
 
     sync_interval_hours: int = Field(default=12, ge=1, le=168)
     yt_sleep_min_seconds: int = Field(default=5, ge=0)
@@ -58,7 +61,7 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = True
 
     model_config = SettingsConfigDict(
-        env_file=BASE_DIR / ".env",
+        env_file=ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -66,6 +69,10 @@ class Settings(BaseSettings):
     @property
     def storage_quota_bytes(self) -> int:
         return self.default_storage_quota_gb * 1024 * 1024 * 1024
+
+    @property
+    def admin_storage_quota_bytes(self) -> int:
+        return self.default_admin_storage_quota_gb * 1024 * 1024 * 1024
 
     @property
     def auth_cookie_secure_enabled(self) -> bool:

@@ -137,16 +137,33 @@ function renderActiveDownloads(tasks) {
     }).join("");
 }
 
-async function refreshActiveDownloads() {
-    if (!document.getElementById("activeDownloads")) return;
+let activeDownloadsRefreshing = false;
+let activeDownloadsPollTimer = null;
 
+async function refreshActiveDownloads() {
+    if (!document.getElementById("activeDownloads")) return [];
+    if (activeDownloadsRefreshing) return [];
+
+    activeDownloadsRefreshing = true;
     try {
         const tasks = await requestJson("/tasks/active");
         renderActiveDownloads(tasks);
-
+        return tasks;
     } catch (error) {
         console.warn("Unable to refresh active downloads", error);
+        return [];
+    } finally {
+        activeDownloadsRefreshing = false;
     }
+}
+
+function scheduleActiveDownloadsPoll(delay = 8000) {
+    if (!document.getElementById("activeDownloads")) return;
+    if (activeDownloadsPollTimer) window.clearTimeout(activeDownloadsPollTimer);
+    activeDownloadsPollTimer = window.setTimeout(async () => {
+        const tasks = await refreshActiveDownloads();
+        scheduleActiveDownloadsPoll(tasks.length ? 1500 : 8000);
+    }, delay);
 }
 
 async function pollTask(taskId) {
@@ -492,7 +509,8 @@ async function navigateTo(url, options = {}) {
     }
     collapseTopNav();
     initPlaylistTools();
-    await refreshActiveDownloads();
+    const tasks = await refreshActiveDownloads();
+    scheduleActiveDownloadsPoll(tasks.length ? 1500 : 8000);
     if (scrollToTop) window.scrollTo(0, 0);
 }
 
@@ -615,5 +633,5 @@ document.addEventListener("DOMContentLoaded", () => {
     initGlobalPlayer();
     initPlaylistTools();
     refreshActiveDownloads();
-    window.setInterval(refreshActiveDownloads, 1500);
+    scheduleActiveDownloadsPoll(1500);
 });

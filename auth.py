@@ -246,14 +246,15 @@ async def register_user(
         await session.refresh(existing_user)
         return existing_user
 
+    is_admin = is_admin_email(normalized_email, password_user_count)
     user = User(
         email=normalized_email,
         hashed_password=hash_password(password),
         is_active=True,
         is_verified=not settings.email_verification_required,
-        is_superuser=is_admin_email(normalized_email, password_user_count),
+        is_superuser=is_admin,
         playlist_quota=settings.default_playlist_quota,
-        storage_quota_bytes=settings.storage_quota_bytes,
+        storage_quota_bytes=settings.admin_storage_quota_bytes if is_admin else settings.storage_quota_bytes,
     )
     session.add(user)
     await session.commit()
