@@ -19,6 +19,19 @@ body.has-player-bar {
     max-width: 1320px;
 }
 
+.navbar-brand {
+    align-items: center;
+    display: inline-flex;
+    gap: 8px;
+}
+
+.app-logo {
+    border-radius: 6px;
+    display: inline-block;
+    height: 28px;
+    width: 28px;
+}
+
 .panel,
 .table-shell {
     background: var(--surface);

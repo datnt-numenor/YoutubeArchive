@@ -63,7 +63,7 @@ except ImportError:  # pragma: no cover - optional production dependency
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-ASSET_VERSION = "20260702-auth-nav"
+ASSET_VERSION = "20260702-logo"
 
 if settings.sentry_dsn and sentry_sdk:
     sentry_sdk.init(dsn=settings.sentry_dsn, environment=settings.environment)
