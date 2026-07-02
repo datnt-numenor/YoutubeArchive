@@ -21,12 +21,12 @@ async def count_user_playlists(session: AsyncSession, owner_id: str) -> int:
 
 async def list_playlists(session: AsyncSession, owner_id: str) -> list[PlaylistSchema]:
     result = await session.execute(
-        select(Playlist)
+        select(Playlist, func.count(PlaylistVideo.video_id))
+        .outerjoin(PlaylistVideo, PlaylistVideo.playlist_id == Playlist.id)
         .where(Playlist.owner_id == owner_id)
-        .options(selectinload(Playlist.playlist_videos))
+        .group_by(Playlist.id)
         .order_by(Playlist.created_at.desc())
     )
-    playlists = result.scalars().unique().all()
     return [
         PlaylistSchema(
             id=playlist.id,
@@ -35,9 +35,9 @@ async def list_playlists(session: AsyncSession, owner_id: str) -> list[PlaylistS
             auto_sync=playlist.auto_sync,
             created_at=playlist.created_at,
             last_synced=playlist.last_synced,
-            video_count=len(playlist.playlist_videos),
+            video_count=int(video_count or 0),
         )
-        for playlist in playlists
+        for playlist, video_count in result.all()
     ]
 
 

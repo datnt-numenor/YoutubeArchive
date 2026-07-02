@@ -64,6 +64,189 @@ async function requestJson(url, options = {}) {
     return data;
 }
 
+const pageCache = new Map();
+const pagePrefetches = new Map();
+const PAGE_CACHE_TTL_MS = 30_000;
+const PAGE_CACHE_MAX_ENTRIES = 16;
+const PAGE_PREFETCH_LIMIT = 8;
+
+function navigationKey(url) {
+    const normalized = new URL(url, window.location.href);
+    normalized.hash = "";
+    return `${normalized.pathname}${normalized.search}`;
+}
+
+function isCacheableNavigationUrl(url) {
+    const nextUrl = new URL(url, window.location.href);
+    if (nextUrl.origin !== window.location.origin) return false;
+    if (nextUrl.pathname.startsWith("/stream/")) return false;
+    if (nextUrl.pathname.startsWith("/task/")) return false;
+    if (nextUrl.pathname.startsWith("/api/")) return false;
+    if (nextUrl.pathname === "/login" || nextUrl.pathname === "/register") return false;
+    return true;
+}
+
+function trimPageCache() {
+    while (pageCache.size > PAGE_CACHE_MAX_ENTRIES) {
+        pageCache.delete(pageCache.keys().next().value);
+    }
+}
+
+function invalidatePageCache() {
+    pageCache.clear();
+}
+
+function cachedPage(url) {
+    const key = navigationKey(url);
+    const snapshot = pageCache.get(key);
+    if (!snapshot) return null;
+    if (Date.now() - snapshot.fetchedAt > PAGE_CACHE_TTL_MS) {
+        pageCache.delete(key);
+        return null;
+    }
+    return snapshot;
+}
+
+function storePageSnapshot(snapshot) {
+    pageCache.set(snapshot.key, snapshot);
+    trimPageCache();
+}
+
+function storeCurrentPageSnapshot() {
+    const currentContent = document.getElementById("pageContent");
+    if (!currentContent || !isCacheableNavigationUrl(window.location.href)) return;
+    storePageSnapshot({
+        key: navigationKey(window.location.href),
+        finalUrl: window.location.href,
+        title: document.title,
+        contentHtml: currentContent.innerHTML,
+        fetchedAt: Date.now(),
+    });
+}
+
+function buildPageSnapshot(response, html, requestedUrl) {
+    const finalUrl = new URL(response.url || requestedUrl.href, window.location.href);
+    if (finalUrl.pathname === "/login" || finalUrl.pathname === "/register") {
+        return { redirectUrl: finalUrl.href };
+    }
+
+    const nextDocument = new DOMParser().parseFromString(html, "text/html");
+    const nextContent = nextDocument.getElementById("pageContent");
+    if (!nextContent) return null;
+
+    return {
+        key: navigationKey(finalUrl),
+        finalUrl: finalUrl.href,
+        title: nextDocument.title || document.title,
+        contentHtml: nextContent.innerHTML,
+        fetchedAt: Date.now(),
+    };
+}
+
+async function fetchPageSnapshot(url, options = {}) {
+    const { force = false } = options;
+    const nextUrl = new URL(url, window.location.href);
+    if (!isCacheableNavigationUrl(nextUrl)) return null;
+
+    const key = navigationKey(nextUrl);
+    if (!force) {
+        const existing = cachedPage(nextUrl);
+        if (existing) return existing;
+        if (pagePrefetches.has(key)) return pagePrefetches.get(key);
+    }
+
+    const promise = (async () => {
+        const response = await fetchWithTimeout(nextUrl.href, {
+            credentials: "same-origin",
+            headers: { "X-Requested-With": "fetch" },
+        }, 15000);
+        if (!response.ok) {
+            throw new Error(`Navigation failed with ${response.status}`);
+        }
+        const html = await response.text();
+        const snapshot = buildPageSnapshot(response, html, nextUrl);
+        if (snapshot?.redirectUrl) {
+            window.location.href = snapshot.redirectUrl;
+            return null;
+        }
+        if (snapshot) storePageSnapshot(snapshot);
+        return snapshot;
+    })().finally(() => {
+        pagePrefetches.delete(key);
+    });
+
+    pagePrefetches.set(key, promise);
+    return promise;
+}
+
+function scheduleActiveDownloadsRefresh(delay = 450) {
+    window.setTimeout(() => {
+        refreshActiveDownloads()
+            .then((tasks) => scheduleActiveDownloadsPoll(tasks.length ? 1500 : 8000))
+            .catch(() => scheduleActiveDownloadsPoll(8000));
+    }, delay);
+}
+
+function renderPageSnapshot(snapshot, options = {}) {
+    const { push = true, scrollToTop = true } = options;
+    const currentContent = document.getElementById("pageContent");
+    if (!snapshot || !currentContent) return false;
+
+    document.title = snapshot.title || document.title;
+    currentContent.innerHTML = snapshot.contentHtml;
+    if (push) {
+        window.history.pushState({ softNavigation: true }, "", snapshot.finalUrl);
+    }
+    collapseTopNav();
+    initPlaylistTools();
+    storeCurrentPageSnapshot();
+    scheduleNavigationPrefetch();
+    scheduleActiveDownloadsRefresh();
+    if (scrollToTop) window.scrollTo(0, 0);
+    return true;
+}
+
+function linkFromEvent(event) {
+    return event.target?.closest ? event.target.closest("a") : null;
+}
+
+function prefetchNavigationUrl(url, options = {}) {
+    const nextUrl = new URL(url, window.location.href);
+    if (navigationKey(nextUrl) === navigationKey(window.location.href)) return Promise.resolve(null);
+    return fetchPageSnapshot(nextUrl, options).catch((error) => {
+        console.debug("Navigation prefetch skipped", error);
+        return null;
+    });
+}
+
+function scheduleNavigationPrefetch() {
+    const run = () => {
+        const seen = new Set();
+        const links = Array.from(document.querySelectorAll(".navbar a[href], #pageContent a[href]"));
+        const candidates = links
+            .map((link) => new URL(link.href, window.location.href))
+            .filter((url) => {
+                const key = navigationKey(url);
+                if (seen.has(key) || !isCacheableNavigationUrl(url) || key === navigationKey(window.location.href)) {
+                    return false;
+                }
+                seen.add(key);
+                return true;
+            })
+            .slice(0, PAGE_PREFETCH_LIMIT);
+
+        candidates.forEach((url, index) => {
+            window.setTimeout(() => prefetchNavigationUrl(url), 120 * index);
+        });
+    };
+
+    if ("requestIdleCallback" in window) {
+        window.requestIdleCallback(run, { timeout: 1500 });
+    } else {
+        window.setTimeout(run, 500);
+    }
+}
+
 function escapeHtml(value) {
     return String(value)
         .replaceAll("&", "&amp;")
@@ -491,42 +674,19 @@ function collapseTopNav() {
 }
 
 async function navigateTo(url, options = {}) {
-    const { push = true, scrollToTop = true } = options;
+    const { push = true, scrollToTop = true, useCache = true } = options;
     const nextUrl = new URL(url, window.location.href);
-    const response = await fetchWithTimeout(nextUrl.href, {
-        credentials: "same-origin",
-        headers: { "X-Requested-With": "fetch" },
-    }, 15000);
 
-    const finalUrl = new URL(response.url || nextUrl.href, window.location.href);
-    if (finalUrl.pathname === "/login" || finalUrl.pathname === "/register") {
-        window.location.href = finalUrl.href;
+    const cached = useCache ? cachedPage(nextUrl) : null;
+    if (cached && renderPageSnapshot(cached, { push, scrollToTop })) {
+        prefetchNavigationUrl(nextUrl, { force: true });
         return;
     }
-    if (!response.ok) {
-        throw new Error(`Navigation failed with ${response.status}`);
-    }
 
-    const html = await response.text();
-    const nextDocument = new DOMParser().parseFromString(html, "text/html");
-    const nextContent = nextDocument.getElementById("pageContent");
-    const currentContent = document.getElementById("pageContent");
-    if (!nextContent || !currentContent) {
+    const snapshot = await fetchPageSnapshot(nextUrl);
+    if (!snapshot || !renderPageSnapshot(snapshot, { push, scrollToTop })) {
         window.location.href = nextUrl.href;
-        return;
     }
-
-    document.title = nextDocument.title || document.title;
-    currentContent.innerHTML = nextContent.innerHTML;
-    if (push) {
-        window.history.pushState({ softNavigation: true }, "", finalUrl.href);
-    }
-    collapseTopNav();
-    initPlaylistTools();
-    refreshActiveDownloads()
-        .then((tasks) => scheduleActiveDownloadsPoll(tasks.length ? 1500 : 8000))
-        .catch(() => scheduleActiveDownloadsPoll(8000));
-    if (scrollToTop) window.scrollTo(0, 0);
 }
 
 async function refreshCurrentPage() {
@@ -547,6 +707,7 @@ document.addEventListener("submit", async (event) => {
                 method: "POST",
                 body: JSON.stringify({ url: input.value }),
             });
+            invalidatePageCache();
             showToast(data.message || "Playlist added");
             window.setTimeout(() => {
                 navigateTo(`/playlist/${data.playlist_id}`).catch(() => {
@@ -566,6 +727,7 @@ document.addEventListener("submit", async (event) => {
                 method: "PATCH",
                 body: JSON.stringify({ hours: Number(input.value) }),
             });
+            invalidatePageCache();
             showToast(data.message || "Settings saved");
         } catch (error) {
             showToast(error.message, "danger");
@@ -587,6 +749,7 @@ document.addEventListener("click", async (event) => {
                 method: "POST",
                 body: JSON.stringify({ format: syncButton.dataset.format || "mp3" }),
             });
+            invalidatePageCache();
             showToast("Sync queued");
             await refreshActiveDownloads();
             pollTask(data.task_id).catch((error) => showToast(error.message, "danger"));
@@ -610,6 +773,7 @@ document.addEventListener("click", async (event) => {
         if (!window.confirm("Delete this playlist from the archive?")) return;
         try {
             const data = await requestJson(`/playlist/${deleteButton.dataset.playlistId}`, { method: "DELETE" });
+            invalidatePageCache();
             showToast(data.message || "Playlist deleted");
             window.setTimeout(() => refreshCurrentPage(), 700);
         } catch (error) {
@@ -636,6 +800,14 @@ document.addEventListener("click", async (event) => {
     }
 });
 
+["pointerover", "focusin", "touchstart", "mousedown"].forEach((eventName) => {
+    document.addEventListener(eventName, (event) => {
+        const link = linkFromEvent(event);
+        if (!link || !isCacheableNavigationUrl(link.href)) return;
+        prefetchNavigationUrl(link.href);
+    }, { passive: true });
+});
+
 window.addEventListener("popstate", () => {
     navigateTo(window.location.href, { push: false }).catch((error) => {
         console.warn("History navigation failed; falling back to full navigation", error);
@@ -647,6 +819,8 @@ document.addEventListener("DOMContentLoaded", () => {
     window.history.replaceState({ softNavigation: true }, "", window.location.href);
     initGlobalPlayer();
     initPlaylistTools();
-    refreshActiveDownloads();
-    scheduleActiveDownloadsPoll(1500);
+    storeCurrentPageSnapshot();
+    scheduleNavigationPrefetch();
+    scheduleActiveDownloadsRefresh(1000);
+    scheduleActiveDownloadsPoll(2500);
 });

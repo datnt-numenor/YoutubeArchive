@@ -40,6 +40,35 @@ async def test_deleted_video_is_not_reopened_by_metadata_sync(session) -> None:
     assert targets == []
 
 
+async def test_list_playlists_counts_videos_without_loading_detail_rows(session) -> None:
+    owner = User(email="owner@example.com")
+    other_owner = User(email="other@example.com")
+    playlist = Playlist(owner=owner, yt_playlist_id="playlist123", title="Playlist", url="https://example.com")
+    other_playlist = Playlist(owner=other_owner, yt_playlist_id="playlist456", title="Other", url="https://example.com")
+    first_video = Video(**sample_video("video123"), status=VideoStatus.AVAILABLE)
+    second_video = Video(**sample_video("video456"), status=VideoStatus.AVAILABLE)
+    session.add_all(
+        [
+            owner,
+            other_owner,
+            playlist,
+            other_playlist,
+            first_video,
+            second_video,
+            PlaylistVideo(playlist=playlist, video=first_video),
+            PlaylistVideo(playlist=playlist, video=second_video),
+            PlaylistVideo(playlist=other_playlist, video=second_video),
+        ]
+    )
+    await session.commit()
+
+    playlists = await crud.list_playlists(session, owner.id)
+
+    assert len(playlists) == 1
+    assert playlists[0].id == playlist.id
+    assert playlists[0].video_count == 2
+
+
 async def test_mark_unavailable_sets_deleted_status_and_error(session) -> None:
     owner = User(email="owner@example.com")
     playlist = Playlist(owner=owner, yt_playlist_id="playlist123", title="Playlist", url="https://example.com")
