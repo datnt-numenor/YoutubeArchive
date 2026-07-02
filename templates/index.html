@@ -1,87 +1,103 @@
 {% extends "base.html" %}
 
 {% block content %}
-<section class="row g-4 align-items-start">
-    <div class="col-12 col-xl-4">
-        <div class="panel">
-            <div class="panel-header">
-                <h1>Archive playlist</h1>
-                <p>Lưu metadata trước, tải media khi bạn bấm sync.</p>
-            </div>
-            <form id="addPlaylistForm" class="d-grid gap-3">
-                <label class="form-label" for="playlistUrl">YouTube playlist URL</label>
-                <div class="input-group">
-                    <span class="input-group-text"><i class="bi bi-link-45deg"></i></span>
-                    <input class="form-control" id="playlistUrl" name="url" type="url" placeholder="https://www.youtube.com/playlist?list=..." required>
-                </div>
-                <button class="btn btn-danger" type="submit">
-                    <i class="bi bi-plus-lg me-1"></i>Add playlist
-                </button>
-            </form>
+<section class="dashboard-hero">
+    <div>
+        <span class="eyebrow">Dashboard</span>
+        <h2>Your archived playlists</h2>
+        <p>Save playlist metadata first, then download media when you sync.</p>
+    </div>
+    <div class="hero-metrics">
+        <div class="metric-tile">
+            <span class="metric-label">Storage</span>
+            <strong>{{ user.storage_used_bytes|bytes }}</strong>
+            <small>of {{ user.storage_quota_bytes|bytes }}</small>
         </div>
-
-        <div class="panel mt-3">
-            <div class="quota-grid">
-                <div>
-                    <span class="metric-label">Storage</span>
-                    <strong>{{ user.storage_used_bytes|bytes }}</strong>
-                    <small>of {{ user.storage_quota_bytes|bytes }}</small>
-                </div>
-                <div>
-                    <span class="metric-label">Playlist quota</span>
-                    <strong>{{ playlists|length }}</strong>
-                    <small>of {{ user.playlist_quota }}</small>
-                </div>
-            </div>
+        <div class="metric-tile">
+            <span class="metric-label">Playlists</span>
+            <strong>{{ playlists|length }}</strong>
+            <small>of {{ user.playlist_quota }}</small>
         </div>
     </div>
+</section>
 
-    <div class="col-12 col-xl-8">
-        <div class="section-heading">
-            <h2>Saved playlists</h2>
-            <span class="text-muted">{{ playlists|length }} total</span>
+<section class="dashboard-layout">
+    <aside class="panel archive-panel">
+        <div class="panel-header">
+            <span class="eyebrow">Archive</span>
+            <h1>Add playlist</h1>
+            <p>Paste a YouTube playlist URL and import metadata in the background.</p>
         </div>
-        <div class="table-shell">
-            <table class="table align-middle mb-0">
-                <thead>
-                    <tr>
-                        <th>Playlist</th>
-                        <th class="text-end">Videos</th>
-                        <th>Last sync</th>
-                        <th class="text-end">Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {% for playlist in playlists %}
-                    <tr>
-                        <td>
-                            <a class="fw-semibold link-dark text-decoration-none" href="/playlist/{{ playlist.id }}">{{ playlist.title }}</a>
-                            <div class="small text-muted text-truncate table-url">{{ playlist.url }}</div>
-                        </td>
-                        <td class="text-end">{{ playlist.video_count }}</td>
-                        <td>{{ playlist.last_synced.strftime('%Y-%m-%d %H:%M') if playlist.last_synced else 'Never' }}</td>
-                        <td class="text-end">
-                            <div class="btn-group">
-                                <a class="btn btn-sm btn-outline-secondary" href="/playlist/{{ playlist.id }}" title="Open playlist">
-                                    <i class="bi bi-box-arrow-up-right"></i>
-                                </a>
-                                <button class="btn btn-sm btn-outline-danger js-sync" data-playlist-id="{{ playlist.id }}" data-format="mp3" title="Sync MP3">
-                                    <i class="bi bi-music-note-beamed"></i>
-                                </button>
-                                <button class="btn btn-sm btn-outline-dark js-delete" data-playlist-id="{{ playlist.id }}" title="Delete playlist">
-                                    <i class="bi bi-trash"></i>
-                                </button>
-                            </div>
-                        </td>
-                    </tr>
+        <form id="addPlaylistForm" class="d-grid gap-3">
+            <label class="form-label" for="playlistUrl">YouTube playlist URL</label>
+            <div class="input-group input-glow">
+                <span class="input-group-text"><i class="bi bi-link-45deg"></i></span>
+                <input class="form-control" id="playlistUrl" name="url" type="url" placeholder="https://www.youtube.com/playlist?list=..." required>
+            </div>
+            <button class="btn btn-neon w-100" type="submit">
+                <i class="bi bi-plus-lg me-1"></i>Add playlist
+            </button>
+        </form>
+    </aside>
+
+    <section class="playlist-board">
+        <div class="playlist-toolbar">
+            <div>
+                <span class="eyebrow">Library</span>
+                <h2>Saved playlists</h2>
+            </div>
+            <div class="playlist-search">
+                <label class="visually-hidden" for="playlistSearch">Search playlists</label>
+                <div class="input-group input-glow">
+                    <span class="input-group-text"><i class="bi bi-search"></i></span>
+                    <input class="form-control" id="playlistSearch" type="search" placeholder="Search playlists..." autocomplete="off">
+                </div>
+                <span class="playlist-count" id="playlistSearchCount">{{ playlists|length }} total</span>
+            </div>
+        </div>
+
+        <div class="playlist-card-grid" id="playlistGrid">
+            {% for playlist in playlists %}
+            <article class="playlist-card js-playlist-card" data-title="{{ playlist.title|lower }}" data-url="{{ playlist.url|lower }}">
+                <a class="playlist-cover" href="/playlist/{{ playlist.id }}" aria-label="Open {{ playlist.title }}">
+                    {% if playlist.thumbnail_url %}
+                    <img src="{{ playlist.thumbnail_url }}" alt="" loading="lazy">
                     {% else %}
-                    <tr>
-                        <td colspan="4" class="empty-state">No playlists archived yet.</td>
-                    </tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+                    <span class="cover-art cover-tone-{{ loop.index0 % 6 }}">
+                        <i class="bi bi-play-fill"></i>
+                    </span>
+                    {% endif %}
+                    <span class="cover-glow"></span>
+                    <span class="cover-stat">{{ playlist.video_count }} tracks</span>
+                </a>
+                <div class="playlist-card-body">
+                    <div>
+                        <h3>
+                            <a href="/playlist/{{ playlist.id }}">{{ playlist.title }}</a>
+                        </h3>
+                        <p>{{ playlist.last_synced.strftime('%Y-%m-%d %H:%M') if playlist.last_synced else 'Import pending' }}</p>
+                    </div>
+                    <span class="playlist-status {{ 'is-ready' if playlist.video_count else 'is-pending' }}">
+                        {{ 'Ready' if playlist.video_count else 'Importing' }}
+                    </span>
+                </div>
+                <div class="playlist-card-actions">
+                    <a class="btn btn-sm btn-ghost" href="/playlist/{{ playlist.id }}">
+                        <i class="bi bi-box-arrow-up-right me-1"></i>Open
+                    </a>
+                    <button class="btn btn-sm btn-soft-cyan js-sync" data-playlist-id="{{ playlist.id }}" data-format="mp3">
+                        <i class="bi bi-music-note-beamed me-1"></i>Sync
+                    </button>
+                    <button class="btn btn-sm icon-btn js-delete" data-playlist-id="{{ playlist.id }}" title="Delete playlist">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            </article>
+            {% else %}
+            <div class="empty-state playlist-empty">No playlists archived yet.</div>
+            {% endfor %}
+            <div class="empty-state playlist-empty d-none" id="playlistSearchEmpty">No playlists match your search.</div>
         </div>
-    </div>
+    </section>
 </section>
 {% endblock %}

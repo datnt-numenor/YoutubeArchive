@@ -5,7 +5,7 @@ FastAPI app for archiving YouTube playlist metadata and downloading playlist med
 ## What is included
 
 - FastAPI + Jinja2 UI
-- Async SQLAlchemy + SQLite default database
+- Async SQLAlchemy + SQLite default database for local development
 - Pydantic v2 schemas
 - `yt-dlp` metadata extraction and MP3/MP4 download module
 - APScheduler `AsyncIOScheduler` with an async lock to prevent overlapping jobs
@@ -138,7 +138,7 @@ The smoke script checks database connectivity, Redis, Celery worker ping, and S3
 
 ## Notes
 
-- The first request creates `ytarchive.db`; user accounts are created through `/register`.
+- Local development stores SQLite data in a writable sibling folder by default: `../YoutubeArchive-local-data/ytarchive.db`; user accounts are created through `/register`.
 - The initial Alembic migration is a baseline for new databases. Migrating existing local SQLite data into PostgreSQL should be handled as a separate export/import step.
 - Downloading MP3 requires FFmpeg installed on your machine because `yt-dlp` uses it for audio extraction.
 - Auth is intentionally isolated in `auth.py`. Public multi-user production should still add stricter account administration and operational monitoring around the implemented CSRF, password reset, email verification, and lockout flows.

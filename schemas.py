@@ -89,6 +89,7 @@ class PlaylistSchema(BaseModel):
     created_at: datetime
     last_synced: datetime | None
     video_count: int = 0
+    thumbnail_url: str | None = None
 
 
 class PlaylistDetailResponse(BaseModel):

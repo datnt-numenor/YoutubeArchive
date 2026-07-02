@@ -209,6 +209,7 @@ function renderPageSnapshot(snapshot, options = {}) {
         window.history.pushState({ softNavigation: true }, "", snapshot.finalUrl);
     }
     collapseTopNav();
+    syncNavigationState();
     initPlaylistTools();
     storeCurrentPageSnapshot();
     scheduleNavigationPrefetch();
@@ -236,7 +237,7 @@ function scheduleNavigationPrefetch() {
     const run = () => {
         if (!hasAuthenticatedShell() || isLoggingOut) return;
         const seen = new Set();
-        const links = Array.from(document.querySelectorAll(".navbar a[href], #pageContent a[href]"));
+        const links = Array.from(document.querySelectorAll(".app-sidebar a[href], .app-topbar a[href], .public-nav a[href], #pageContent a[href]"));
         const candidates = links
             .map((link) => new URL(link.href, window.location.href))
             .filter((url) => {
@@ -436,6 +437,32 @@ function normalizeSearch(value) {
     return String(value || "").trim().toLocaleLowerCase();
 }
 
+function updatePlaylistSearch() {
+    const input = document.getElementById("playlistSearch");
+    const cards = Array.from(document.querySelectorAll(".js-playlist-card"));
+    const count = document.getElementById("playlistSearchCount");
+    const empty = document.getElementById("playlistSearchEmpty");
+    if (!input && !cards.length) return;
+
+    const query = normalizeSearch(input?.value || "");
+    let visibleCount = 0;
+
+    cards.forEach((card) => {
+        const searchableText = [
+            card.dataset.title,
+            card.dataset.url,
+        ].join(" ");
+        const matches = !query || normalizeSearch(searchableText).includes(query);
+        card.classList.toggle("d-none", !matches);
+        if (matches) visibleCount += 1;
+    });
+
+    if (count) {
+        count.textContent = query ? `${visibleCount}/${cards.length} shown` : `${cards.length} total`;
+    }
+    if (empty) empty.classList.toggle("d-none", !query || visibleCount > 0);
+}
+
 function updateVideoSearch() {
     const input = document.getElementById("videoSearch");
     const rows = Array.from(document.querySelectorAll(".js-video-row"));
@@ -505,7 +532,64 @@ function getPlayerElements() {
         bar: document.getElementById("globalPlayerBar"),
         media: document.getElementById("globalPlayerMedia"),
         title: document.getElementById("globalPlayerTitle"),
+        playPause: document.getElementById("globalPlayerPlayPause"),
+        seek: document.getElementById("globalPlayerSeek"),
+        currentTime: document.getElementById("globalPlayerCurrentTime"),
+        duration: document.getElementById("globalPlayerDuration"),
+        volume: document.getElementById("globalPlayerVolume"),
+        mute: document.getElementById("globalPlayerMute"),
+        shuffle: document.getElementById("globalPlayerShuffle"),
+        repeat: document.getElementById("globalPlayerRepeat"),
     };
+}
+
+function formatPlaybackTime(value) {
+    const seconds = Math.max(0, Math.floor(Number.isFinite(value) ? value : 0));
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    const remaining = seconds % 60;
+    if (hours) {
+        return `${hours}:${String(minutes).padStart(2, "0")}:${String(remaining).padStart(2, "0")}`;
+    }
+    return `${minutes}:${String(remaining).padStart(2, "0")}`;
+}
+
+function setRangeProgress(input, value, max) {
+    if (!input) return;
+    const safeMax = Number(max) || Number(input.max) || 1;
+    const progress = Math.max(0, Math.min(100, (Number(value) / safeMax) * 100));
+    input.style.setProperty("--range-progress", `${progress}%`);
+}
+
+function updateGlobalPlayerControls() {
+    const { media, playPause, seek, currentTime, duration, volume, mute, shuffle, repeat } = getPlayerElements();
+    if (!media) return;
+
+    if (playPause) {
+        playPause.innerHTML = media.paused ? '<i class="bi bi-play-fill"></i>' : '<i class="bi bi-pause-fill"></i>';
+        playPause.classList.toggle("is-active", !media.paused);
+    }
+
+    const mediaDuration = Number.isFinite(media.duration) ? media.duration : 0;
+    if (seek) {
+        const seekValue = mediaDuration ? Math.round((media.currentTime / mediaDuration) * 1000) : 0;
+        seek.value = String(seekValue);
+        setRangeProgress(seek, seekValue, 1000);
+    }
+    if (currentTime) currentTime.textContent = formatPlaybackTime(media.currentTime);
+    if (duration) duration.textContent = formatPlaybackTime(mediaDuration);
+
+    if (volume) {
+        volume.value = String(media.muted ? 0 : media.volume);
+        setRangeProgress(volume, Number(volume.value), 1);
+    }
+    if (mute) {
+        const muted = media.muted || media.volume === 0;
+        mute.innerHTML = muted ? '<i class="bi bi-volume-mute-fill"></i>' : '<i class="bi bi-volume-up-fill"></i>';
+        mute.classList.toggle("is-active", muted);
+    }
+    if (shuffle) shuffle.classList.toggle("is-active", Boolean(playbackSettings.shuffle));
+    if (repeat) repeat.classList.toggle("is-active", Boolean(playbackSettings.repeat));
 }
 
 function showGlobalPlayer() {
@@ -513,26 +597,35 @@ function showGlobalPlayer() {
     if (!bar) return;
     bar.classList.remove("d-none");
     document.body.classList.add("has-player-bar");
+    updateGlobalPlayerControls();
 }
 
 function stopPlayback() {
-    const { bar, media, title } = getPlayerElements();
+    const { bar, media, title, seek, currentTime, duration } = getPlayerElements();
     if (media) {
         media.pause();
         media.removeAttribute("src");
         media.load();
     }
     if (title) title.textContent = "No track selected";
+    if (seek) {
+        seek.value = "0";
+        setRangeProgress(seek, 0, 1000);
+    }
+    if (currentTime) currentTime.textContent = "0:00";
+    if (duration) duration.textContent = "0:00";
     if (bar) bar.classList.add("d-none");
     document.body.classList.remove("has-player-bar");
     playbackState.currentTrack = null;
     playbackState.currentIndex = -1;
     syncVisiblePlaybackState();
+    updateGlobalPlayerControls();
 }
 
 function applyPlaybackSettingsToMedia() {
     const { media } = getPlayerElements();
     if (media) media.loop = playbackSettings.repeat;
+    updateGlobalPlayerControls();
 }
 
 function syncVisiblePlaybackState() {
@@ -579,9 +672,11 @@ async function playTrack(track, options = {}) {
     applyPlaybackSettingsToMedia();
     showGlobalPlayer();
     syncVisiblePlaybackState();
+    updateGlobalPlayerControls();
 
     try {
         await media.play();
+        updateGlobalPlayerControls();
     } catch (error) {
         console.warn("Media playback was blocked", error);
         showToast("Press play in the media bar to start playback", "warning");
@@ -634,6 +729,7 @@ function bindPlaybackOptions() {
             playbackSettings[settingKey] = input.checked;
             savePlaybackSettings();
             applyPlaybackSettingsToMedia();
+            updateGlobalPlayerControls();
         });
     });
 }
@@ -644,18 +740,74 @@ function initGlobalPlayer() {
     if (globalPlayerInitialized) return;
     globalPlayerInitialized = true;
 
-    const { media } = getPlayerElements();
-    if (media) media.addEventListener("ended", handleTrackEnded);
+    const { media, playPause, seek, volume, mute, shuffle, repeat } = getPlayerElements();
+    if (media) {
+        media.addEventListener("ended", handleTrackEnded);
+        ["timeupdate", "loadedmetadata", "durationchange", "play", "pause", "volumechange", "emptied"].forEach((eventName) => {
+            media.addEventListener(eventName, updateGlobalPlayerControls);
+        });
+    }
 
     document.getElementById("globalPlayerPrev")?.addEventListener("click", () => playTrack(nextTrack(-1), { resetQueue: false }));
     document.getElementById("globalPlayerNext")?.addEventListener("click", () => playTrack(nextTrack(1), { resetQueue: false }));
-    document.getElementById("globalPlayerStop")?.addEventListener("click", stopPlayback);
     document.getElementById("globalPlayerClose")?.addEventListener("click", stopPlayback);
+
+    playPause?.addEventListener("click", async () => {
+        if (!media?.src) return;
+        if (media.paused) {
+            try {
+                await media.play();
+            } catch (error) {
+                console.warn("Media playback was blocked", error);
+                showToast("Press play in the media bar to start playback", "warning");
+            }
+        } else {
+            media.pause();
+        }
+        updateGlobalPlayerControls();
+    });
+
+    seek?.addEventListener("input", () => {
+        if (!media || !Number.isFinite(media.duration) || !media.duration) return;
+        media.currentTime = (Number(seek.value) / 1000) * media.duration;
+        updateGlobalPlayerControls();
+    });
+
+    volume?.addEventListener("input", () => {
+        if (!media) return;
+        media.volume = Number(volume.value);
+        media.muted = media.volume === 0;
+        updateGlobalPlayerControls();
+    });
+
+    mute?.addEventListener("click", () => {
+        if (!media) return;
+        media.muted = !media.muted;
+        updateGlobalPlayerControls();
+    });
+
+    shuffle?.addEventListener("click", () => {
+        playbackSettings.shuffle = !playbackSettings.shuffle;
+        savePlaybackSettings();
+        updateGlobalPlayerControls();
+    });
+
+    repeat?.addEventListener("click", () => {
+        playbackSettings.repeat = !playbackSettings.repeat;
+        savePlaybackSettings();
+        applyPlaybackSettingsToMedia();
+    });
+
+    updateGlobalPlayerControls();
 }
 
 function initPlaylistTools() {
+    const playlistSearch = document.getElementById("playlistSearch");
     const search = document.getElementById("videoSearch");
     const clearSearch = document.getElementById("clearVideoSearch");
+
+    if (playlistSearch) playlistSearch.addEventListener("input", updatePlaylistSearch);
+    updatePlaylistSearch();
 
     if (search) search.addEventListener("input", updateVideoSearch);
     if (clearSearch) {
@@ -693,6 +845,28 @@ function collapseTopNav() {
     const nav = document.getElementById("topNav");
     if (!nav?.classList.contains("show") || !window.bootstrap) return;
     bootstrap.Collapse.getOrCreateInstance(nav, { toggle: false }).hide();
+}
+
+function sectionForPath(pathname) {
+    if (pathname.startsWith("/settings")) {
+        return { nav: "settings", label: "Settings" };
+    }
+    if (pathname.startsWith("/admin")) {
+        return { nav: "admin", label: "Admin" };
+    }
+    if (pathname.startsWith("/playlist/")) {
+        return { nav: "dashboard", label: "Playlist detail" };
+    }
+    return { nav: "dashboard", label: "Dashboard" };
+}
+
+function syncNavigationState() {
+    const section = sectionForPath(window.location.pathname);
+    document.querySelectorAll(".sidebar-link[data-nav]").forEach((link) => {
+        link.classList.toggle("active", link.dataset.nav === section.nav);
+    });
+    const label = document.getElementById("currentSectionLabel");
+    if (label) label.textContent = section.label;
 }
 
 async function navigateTo(url, options = {}) {
@@ -856,6 +1030,7 @@ window.addEventListener("popstate", () => {
 
 document.addEventListener("DOMContentLoaded", () => {
     window.history.replaceState({ softNavigation: true }, "", window.location.href);
+    syncNavigationState();
     initGlobalPlayer();
     initPlaylistTools();
     storeCurrentPageSnapshot();

@@ -8,8 +8,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_SQLITE_URL = f"sqlite+aiosqlite:///{(BASE_DIR / 'ytarchive.db').as_posix()}"
+LOCAL_DATA_DIR = Path(os.environ.get("YTARCHIVE_LOCAL_DATA_DIR", BASE_DIR.parent / "YoutubeArchive-local-data"))
+DEFAULT_SQLITE_URL = f"sqlite+aiosqlite:///{(LOCAL_DATA_DIR / 'ytarchive.db').as_posix()}"
 ENV_FILE = Path(os.environ.get("ENV_FILE", BASE_DIR / ".env"))
+
+
+def sqlite_path_from_url(database_url: str) -> Path | None:
+    prefix = "sqlite+aiosqlite:///"
+    if not database_url.startswith(prefix):
+        return None
+    return Path(database_url.removeprefix(prefix))
 
 
 class Settings(BaseSettings):
@@ -114,6 +122,8 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()
+    if sqlite_path := sqlite_path_from_url(settings.database_url):
+        sqlite_path.parent.mkdir(parents=True, exist_ok=True)
     settings.downloads_dir.mkdir(parents=True, exist_ok=True)
     return settings
 
